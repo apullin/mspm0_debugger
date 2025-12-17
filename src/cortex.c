@@ -2,12 +2,15 @@
 
 #include "cortex.h"
 
+#include <stddef.h>
+
 #include "target_mem.h"
 
 // Core debug regs
 #define DHCSR 0xE000EDF0u
 #define DCRSR 0xE000EDF4u
 #define DCRDR 0xE000EDF8u
+#define CPUID 0xE000ED00u
 
 #define DHCSR_DBGKEY     (0xA05Fu << 16)
 #define DHCSR_C_DEBUGEN  (1u << 0)
@@ -28,6 +31,240 @@ typedef struct {
 static bool     g_fpb_inited   = false;
 static uint8_t  g_fpb_num_code = 0;
 static fpb_slot_t g_fpb_slots[8];
+
+static cortexm_target_t g_target = CORTEXM_TARGET_UNKNOWN;
+
+#if defined(PROBE_ENABLE_QXFER_TARGET_XML) && (PROBE_ENABLE_QXFER_TARGET_XML)
+static const char g_target_xml_v6m[] =
+    "<?xml version=\"1.0\"?>\n"
+    "<!DOCTYPE target SYSTEM \"gdb-target.dtd\">\n"
+    "<target>\n"
+    "  <architecture>armv6-m</architecture>\n"
+    "  <feature name=\"org.gnu.gdb.arm.m-profile\">\n"
+    "    <reg name=\"r0\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r1\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r2\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r3\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r4\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r5\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r6\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r7\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r8\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r9\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r10\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r11\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r12\" bitsize=\"32\"/>\n"
+    "    <reg name=\"sp\" bitsize=\"32\"/>\n"
+    "    <reg name=\"lr\" bitsize=\"32\"/>\n"
+    "    <reg name=\"pc\" bitsize=\"32\"/>\n"
+    "    <reg name=\"xpsr\" bitsize=\"32\"/>\n"
+    "  </feature>\n"
+    "</target>\n";
+
+static const char g_target_xml_v7m[] =
+    "<?xml version=\"1.0\"?>\n"
+    "<!DOCTYPE target SYSTEM \"gdb-target.dtd\">\n"
+    "<target>\n"
+    "  <architecture>armv7-m</architecture>\n"
+    "  <feature name=\"org.gnu.gdb.arm.m-profile\">\n"
+    "    <reg name=\"r0\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r1\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r2\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r3\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r4\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r5\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r6\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r7\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r8\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r9\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r10\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r11\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r12\" bitsize=\"32\"/>\n"
+    "    <reg name=\"sp\" bitsize=\"32\"/>\n"
+    "    <reg name=\"lr\" bitsize=\"32\"/>\n"
+    "    <reg name=\"pc\" bitsize=\"32\"/>\n"
+    "    <reg name=\"xpsr\" bitsize=\"32\"/>\n"
+    "  </feature>\n"
+    "</target>\n";
+
+static const char g_target_xml_v7em[] =
+    "<?xml version=\"1.0\"?>\n"
+    "<!DOCTYPE target SYSTEM \"gdb-target.dtd\">\n"
+    "<target>\n"
+    "  <architecture>armv7e-m</architecture>\n"
+    "  <feature name=\"org.gnu.gdb.arm.m-profile\">\n"
+    "    <reg name=\"r0\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r1\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r2\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r3\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r4\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r5\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r6\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r7\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r8\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r9\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r10\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r11\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r12\" bitsize=\"32\"/>\n"
+    "    <reg name=\"sp\" bitsize=\"32\"/>\n"
+    "    <reg name=\"lr\" bitsize=\"32\"/>\n"
+    "    <reg name=\"pc\" bitsize=\"32\"/>\n"
+    "    <reg name=\"xpsr\" bitsize=\"32\"/>\n"
+    "  </feature>\n"
+    "</target>\n";
+
+static const char g_target_xml_v8m_main[] =
+    "<?xml version=\"1.0\"?>\n"
+    "<!DOCTYPE target SYSTEM \"gdb-target.dtd\">\n"
+    "<target>\n"
+    "  <architecture>armv8-m.main</architecture>\n"
+    "  <feature name=\"org.gnu.gdb.arm.m-profile\">\n"
+    "    <reg name=\"r0\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r1\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r2\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r3\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r4\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r5\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r6\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r7\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r8\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r9\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r10\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r11\" bitsize=\"32\"/>\n"
+    "    <reg name=\"r12\" bitsize=\"32\"/>\n"
+    "    <reg name=\"sp\" bitsize=\"32\"/>\n"
+    "    <reg name=\"lr\" bitsize=\"32\"/>\n"
+    "    <reg name=\"pc\" bitsize=\"32\"/>\n"
+    "    <reg name=\"xpsr\" bitsize=\"32\"/>\n"
+    "  </feature>\n"
+    "</target>\n";
+
+static const char *g_target_xml     = NULL;
+static uint32_t    g_target_xml_len = 0;
+#endif
+
+void cortex_target_init(void)
+{
+    // CPUID partno values (bits [15:4])
+    // See ARM Cortex-M TRMs / ARM ARM.
+    const uint16_t PARTNO_CM0  = 0xC20u;
+    const uint16_t PARTNO_CM0P = 0xC60u;
+    const uint16_t PARTNO_CM3  = 0xC23u;
+    const uint16_t PARTNO_CM4  = 0xC24u;
+    const uint16_t PARTNO_CM7  = 0xC27u;
+    const uint16_t PARTNO_CM33 = 0xD21u;
+    const uint16_t PARTNO_CM55 = 0xD22u;
+
+    g_target = CORTEXM_TARGET_UNKNOWN;
+
+    uint32_t cpuid = 0;
+    if (!target_mem_read_word(CPUID, &cpuid)) {
+        return;
+    }
+
+    uint16_t partno = (uint16_t) ((cpuid >> 4) & 0x0FFFu);
+    switch (partno) {
+    case PARTNO_CM0:
+#if defined(PROBE_TARGET_M0)
+        g_target = CORTEXM_TARGET_M0;
+#else
+        g_target = CORTEXM_TARGET_UNKNOWN;
+#endif
+        break;
+    case PARTNO_CM0P:
+        // Always supported (baseline target profile).
+        g_target = CORTEXM_TARGET_M0P;
+        break;
+    case PARTNO_CM3:
+#if defined(PROBE_TARGET_M3)
+        g_target = CORTEXM_TARGET_M3;
+#else
+        g_target = CORTEXM_TARGET_UNKNOWN;
+#endif
+        break;
+    case PARTNO_CM4:
+#if defined(PROBE_TARGET_M4)
+        g_target = CORTEXM_TARGET_M4;
+#else
+        g_target = CORTEXM_TARGET_UNKNOWN;
+#endif
+        break;
+    case PARTNO_CM7:
+#if defined(PROBE_TARGET_M7)
+        g_target = CORTEXM_TARGET_M7;
+#else
+        g_target = CORTEXM_TARGET_UNKNOWN;
+#endif
+        break;
+    case PARTNO_CM33:
+#if defined(PROBE_TARGET_M33)
+        g_target = CORTEXM_TARGET_M33;
+#else
+        g_target = CORTEXM_TARGET_UNKNOWN;
+#endif
+        break;
+    case PARTNO_CM55:
+#if defined(PROBE_TARGET_M55)
+        g_target = CORTEXM_TARGET_M55;
+#else
+        g_target = CORTEXM_TARGET_UNKNOWN;
+#endif
+        break;
+    default:
+        g_target = CORTEXM_TARGET_UNKNOWN;
+        break;
+    }
+
+#if defined(PROBE_ENABLE_QXFER_TARGET_XML) && (PROBE_ENABLE_QXFER_TARGET_XML)
+    switch (g_target) {
+    case CORTEXM_TARGET_M0:
+    case CORTEXM_TARGET_M0P:
+        g_target_xml     = g_target_xml_v6m;
+        g_target_xml_len = (uint32_t) (sizeof(g_target_xml_v6m) - 1u);
+        break;
+    case CORTEXM_TARGET_M3:
+        g_target_xml     = g_target_xml_v7m;
+        g_target_xml_len = (uint32_t) (sizeof(g_target_xml_v7m) - 1u);
+        break;
+    case CORTEXM_TARGET_M4:
+    case CORTEXM_TARGET_M7:
+        g_target_xml     = g_target_xml_v7em;
+        g_target_xml_len = (uint32_t) (sizeof(g_target_xml_v7em) - 1u);
+        break;
+    case CORTEXM_TARGET_M33:
+    case CORTEXM_TARGET_M55:
+        g_target_xml     = g_target_xml_v8m_main;
+        g_target_xml_len = (uint32_t) (sizeof(g_target_xml_v8m_main) - 1u);
+        break;
+    default:
+        // Unknown Cortex-M: fall back to v6-M-ish reg model (works for basic debug on all M-profile cores).
+        g_target_xml     = g_target_xml_v6m;
+        g_target_xml_len = (uint32_t) (sizeof(g_target_xml_v6m) - 1u);
+        break;
+    }
+#endif
+}
+
+cortexm_target_t cortex_target_get(void) { return g_target; }
+
+bool cortex_target_xml_get(const char **out_xml, uint32_t *out_len)
+{
+#if defined(PROBE_ENABLE_QXFER_TARGET_XML) && (PROBE_ENABLE_QXFER_TARGET_XML)
+    if (!out_xml || !out_len) {
+        return false;
+    }
+    if (!g_target_xml) {
+        return false;
+    }
+    *out_xml = g_target_xml;
+    *out_len = g_target_xml_len;
+    return true;
+#else
+    (void) out_xml;
+    (void) out_len;
+    return false;
+#endif
+}
 
 static bool cortex_write_dhcsr(uint32_t v)
 {

@@ -41,7 +41,7 @@ typedef enum {
 } rsp_state_t;
 
 static rsp_state_t rsp_state = RSP_IDLE;
-static char        rsp_buf[RSP_MAX_PAYLOAD];
+static char        rsp_buf[RSP_MAX_PAYLOAD + 1u];
 static uint32_t    rsp_len     = 0;
 static uint8_t     rsp_sum     = 0;
 static uint8_t     rsp_rx_csum = 0;
@@ -148,6 +148,32 @@ static void rsp_send_packet_str(const char *payload)
     rsp_send_packet_end(sum);
 }
 
+static void rsp_send_packet_bytes(const char *payload, uint32_t len)
+{
+    uint8_t sum;
+    rsp_send_packet_begin(&sum);
+    for (uint32_t i = 0; i < len; i++) {
+        uint8_t c = (uint8_t) payload[i];
+        sum       = (uint8_t) (sum + c);
+        uart_putc(c);
+    }
+    rsp_send_packet_end(sum);
+}
+
+static void rsp_send_packet_prefix_and_bytes(char prefix, const char *payload, uint32_t len)
+{
+    uint8_t sum;
+    rsp_send_packet_begin(&sum);
+    sum = (uint8_t) (sum + (uint8_t) prefix);
+    uart_putc((uint8_t) prefix);
+    for (uint32_t i = 0; i < len; i++) {
+        uint8_t c = (uint8_t) payload[i];
+        sum       = (uint8_t) (sum + c);
+        uart_putc(c);
+    }
+    rsp_send_packet_end(sum);
+}
+
 static void rsp_send_ok(void) { rsp_send_packet_str("OK"); }
 static void rsp_send_err(void) { rsp_send_packet_str("E01"); }
 static void rsp_send_empty(void) { rsp_send_packet_str(""); }
@@ -235,7 +261,11 @@ static bool rsp_parse_regs_hex(const char *hex, uint32_t regs[17])
 
 static void handle_qSupported(void)
 {
+#if defined(PROBE_ENABLE_QXFER_TARGET_XML) && (PROBE_ENABLE_QXFER_TARGET_XML)
+    rsp_send_packet_str("PacketSize=" RSP_PACKET_SIZE_HEX ";swbreak+;hwbreak+;qXfer:features:read+");
+#else
     rsp_send_packet_str("PacketSize=" RSP_PACKET_SIZE_HEX ";swbreak+;hwbreak+");
+#endif
 }
 
 static bool rsp_running = false;
@@ -305,6 +335,59 @@ static void handle_breakpoint(const char *p)
     // Watchpoints not implemented yet
     rsp_send_empty();
 }
+
+#if defined(PROBE_ENABLE_QXFER_TARGET_XML) && (PROBE_ENABLE_QXFER_TARGET_XML)
+static void handle_qXfer_features_read(const char *p)
+{
+    // qXfer:features:read:target.xml:OFFSET,LENGTH
+    const char *annex = p + (sizeof("qXfer:features:read:") - 1u);
+    const char *q     = strchr(annex, ':');
+    if (!q) {
+        rsp_send_err();
+        return;
+    }
+
+    size_t annex_len = (size_t) (q - annex);
+    if (annex_len != 9u || strncmp(annex, "target.xml", annex_len) != 0) {
+        rsp_send_empty();
+        return;
+    }
+
+    uint32_t    off = 0, len = 0;
+    const char *r = NULL;
+    if (!parse_u32_hex_stop(q + 1, ',', &off, &r)) {
+        rsp_send_err();
+        return;
+    }
+    if (!parse_u32_hex(r, &len)) {
+        rsp_send_err();
+        return;
+    }
+
+    const char *xml     = NULL;
+    uint32_t    xml_len = 0;
+    if (!cortex_target_xml_get(&xml, &xml_len) || !xml) {
+        rsp_send_empty();
+        return;
+    }
+
+    if (off >= xml_len) {
+        rsp_send_packet_str("l");
+        return;
+    }
+
+    uint32_t remaining = xml_len - off;
+    if (len > remaining) {
+        len = remaining;
+    }
+    if (len > (RSP_MAX_PAYLOAD - 1u)) {
+        len = (RSP_MAX_PAYLOAD - 1u);
+    }
+
+    char more = ((off + len) < xml_len) ? 'm' : 'l';
+    rsp_send_packet_prefix_and_bytes(more, xml + off, len);
+}
+#endif
 
 static void rsp_handle_command(void)
 {
@@ -522,6 +605,13 @@ static void rsp_handle_command(void)
         return;
     }
 
+#if defined(PROBE_ENABLE_QXFER_TARGET_XML) && (PROBE_ENABLE_QXFER_TARGET_XML)
+    if (strncmp(p, "qXfer:features:read:", (sizeof("qXfer:features:read:") - 1u)) == 0) {
+        handle_qXfer_features_read(p);
+        return;
+    }
+#endif
+
     if (strncmp(p, "qSupported", 10) == 0) {
         handle_qSupported();
         return;
@@ -581,7 +671,7 @@ void rsp_process_byte(uint8_t c)
         if (c == '#') {
             rsp_state = RSP_IN_CSUM1;
         } else {
-            if (rsp_len < (RSP_MAX_PAYLOAD - 1u)) {
+            if (rsp_len < RSP_MAX_PAYLOAD) {
                 rsp_buf[rsp_len++] = (char) c;
                 rsp_sum            = (uint8_t) (rsp_sum + c);
             } else {
