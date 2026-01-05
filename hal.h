@@ -4,6 +4,7 @@
 
 // Time
 void delay_us(uint32_t us);
+uint32_t hal_time_us(void);     // monotonic time in microseconds (wraps at ~71 min @ 1MHz)
 
 // UART
 int  uart_getc(void);          // returns 0..255, or -1 if no data available

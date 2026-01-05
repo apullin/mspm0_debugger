@@ -130,6 +130,30 @@ void delay_us(uint32_t us)
     }
 }
 
+uint32_t hal_time_us(void)
+{
+    // Monotonic microsecond counter using free-running SysTick (24-bit down-counter).
+    // Must be called at least once per ~700ms to avoid missing wrap-around.
+    static uint32_t last_val   = 0;
+    static uint32_t us_counter = 0;
+    const uint32_t  ticks_per_us = PROBE_CORE_CLK_HZ / 1000000u;
+
+    uint32_t cur = SysTick->VAL & 0x00FFFFFFu;
+    uint32_t elapsed_ticks;
+
+    if (cur <= last_val) {
+        elapsed_ticks = last_val - cur;
+    } else {
+        // SysTick wrapped (counts down from 0x00FFFFFF to 0)
+        elapsed_ticks = last_val + (0x01000000u - cur);
+    }
+
+    us_counter += elapsed_ticks / ticks_per_us;
+    last_val = cur;
+
+    return us_counter;
+}
+
 int uart_getc(void)
 {
     if (DL_UART_Main_isRXFIFOEmpty(PROBE_UART_INST)) {

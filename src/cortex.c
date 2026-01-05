@@ -5,7 +5,11 @@
 #include <stddef.h>
 
 #include "adiv5.h"
+#include "hal.h"
 #include "target_mem.h"
+
+// Timeout for register access operations (microseconds)
+#define REG_ACCESS_TIMEOUT_US 10000u  // 10ms
 
 // Core debug regs
 #define DHCSR 0xE000EDF0u
@@ -447,15 +451,24 @@ bool cortex_read_core_reg(uint32_t regnum, uint32_t *out)
     if (!target_mem_write_word(DCRSR, regnum & 0x1Fu)) {
         return false;
     }
-    for (int i = 0; i < 10000; i++) {
+
+    // Wait for S_REGRDY with timeout
+    uint32_t start = hal_time_us();
+    bool ready = false;
+    while ((hal_time_us() - start) < REG_ACCESS_TIMEOUT_US) {
         uint32_t dh = 0;
         if (!cortex_read_dhcsr(&dh)) {
             return false;
         }
         if (dh & DHCSR_S_REGRDY) {
+            ready = true;
             break;
         }
     }
+    if (!ready) {
+        return false;  // Timeout waiting for register ready
+    }
+
     return target_mem_read_word(DCRDR, out);
 }
 
@@ -467,16 +480,19 @@ bool cortex_write_core_reg(uint32_t regnum, uint32_t v)
     if (!target_mem_write_word(DCRSR, (regnum & 0x1Fu) | (1u << 16))) {
         return false;
     }
-    for (int i = 0; i < 10000; i++) {
+
+    // Wait for S_REGRDY with timeout
+    uint32_t start = hal_time_us();
+    while ((hal_time_us() - start) < REG_ACCESS_TIMEOUT_US) {
         uint32_t dh = 0;
         if (!cortex_read_dhcsr(&dh)) {
             return false;
         }
         if (dh & DHCSR_S_REGRDY) {
-            break;
+            return true;  // Success
         }
     }
-    return true;
+    return false;  // Timeout waiting for register ready
 }
 
 bool cortex_read_gdb_regs(uint32_t regs[17])
