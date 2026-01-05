@@ -424,15 +424,30 @@ bool cortex_continue(void)
 
 bool cortex_step(void)
 {
-    // Halt first, then pulse step while debug enabled.
+    // Halt first to ensure known state.
     if (!cortex_halt()) {
         return false;
     }
+
+    // Set C_STEP to request single-step. Processor will execute one instruction
+    // then halt and clear C_STEP automatically.
     if (!cortex_write_dhcsr(DHCSR_C_DEBUGEN | DHCSR_C_STEP)) {
         return false;
     }
-    // Return to halt after step
-    return cortex_halt();
+
+    // Wait for step to complete (S_HALT set) with timeout.
+    // ARM says C_STEP auto-clears when step completes.
+    uint32_t start = hal_time_us();
+    while ((hal_time_us() - start) < REG_ACCESS_TIMEOUT_US) {
+        uint32_t dh = 0;
+        if (!cortex_read_dhcsr(&dh)) {
+            return false;
+        }
+        if (dh & DHCSR_S_HALT) {
+            return true;  // Step completed, target halted
+        }
+    }
+    return false;  // Timeout waiting for step to complete
 }
 
 bool cortex_is_halted(bool *halted)
