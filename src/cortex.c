@@ -886,7 +886,9 @@ bool cortex_watchpoint_hit(cortexm_watch_t *out_type, uint32_t *out_addr)
         if (!target_mem_read_word(dwt_func_reg(i), &func)) {
             continue;
         }
-        if ((func & DWT_FUNC_MATCHED) && g_dwt_slots[i].used) {
+        // Reading FUNC clears MATCHED bit; continue loop to clear all.
+        // Report only the first matched watchpoint to GDB.
+        if ((func & DWT_FUNC_MATCHED) && g_dwt_slots[i].used && !found) {
             if (out_type) {
                 *out_type = g_dwt_slots[i].type;
             }
@@ -894,7 +896,6 @@ bool cortex_watchpoint_hit(cortexm_watch_t *out_type, uint32_t *out_addr)
                 *out_addr = g_dwt_slots[i].addr;
             }
             found = true;
-            break;
         }
     }
 
