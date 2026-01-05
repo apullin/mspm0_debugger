@@ -92,13 +92,33 @@ bool target_mem_read_bytes(uint32_t addr, uint8_t *buf, uint32_t len)
 bool target_mem_write_bytes(uint32_t addr, const uint8_t *buf, uint32_t len)
 {
     while (len) {
+        uint32_t offset = addr & 3u;
+
+        // Fast path: word-aligned write of 4+ bytes
+        // Skip RMW since we're writing the entire word.
+        // This avoids reading from volatile/side-effect registers.
+        if (offset == 0 && len >= 4) {
+            uint32_t w = (uint32_t) buf[0] |
+                         ((uint32_t) buf[1] << 8) |
+                         ((uint32_t) buf[2] << 16) |
+                         ((uint32_t) buf[3] << 24);
+            if (!target_mem_write_word(addr, w)) {
+                return false;
+            }
+            buf += 4;
+            addr += 4;
+            len -= 4;
+            continue;
+        }
+
+        // Slow path: unaligned or partial word - need RMW
         uint32_t aligned = addr & ~3u;
         uint32_t w       = 0;
         if (!target_mem_read_word(aligned, &w)) {
             return false;
         }
 
-        for (uint32_t i = (addr & 3u); i < 4u && len; i++) {
+        for (uint32_t i = offset; i < 4u && len; i++) {
             uint32_t mask = 0xFFu << (8u * i);
             w             = (w & ~mask) | ((uint32_t) (*buf++) << (8u * i));
             addr++;
