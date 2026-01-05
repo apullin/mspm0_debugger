@@ -184,6 +184,45 @@ static void rsp_send_sigtrap(void)
     rsp_send_packet_str("S05");
 }
 
+static void rsp_send_trap_watchpoint(cortexm_watch_t wt, uint32_t addr)
+{
+    const char *tag = "watch";
+    if (wt == CORTEXM_WATCH_READ) {
+        tag = "rwatch";
+    } else if (wt == CORTEXM_WATCH_ACCESS) {
+        tag = "awatch";
+    }
+
+    uint8_t sum;
+    rsp_send_packet_begin(&sum);
+
+    const char *p = "T05";
+    while (*p) {
+        uint8_t c = (uint8_t) *p++;
+        sum       = (uint8_t) (sum + c);
+        uart_putc(c);
+    }
+
+    while (*tag) {
+        uint8_t c = (uint8_t) *tag++;
+        sum       = (uint8_t) (sum + c);
+        uart_putc(c);
+    }
+    sum = (uint8_t) (sum + (uint8_t) ':');
+    uart_putc((uint8_t) ':');
+
+    for (int i = 7; i >= 0; i--) {
+        char c = nibble_hex((addr >> (4u * (uint32_t) i)) & 0xFu);
+        sum    = (uint8_t) (sum + (uint8_t) c);
+        uart_putc((uint8_t) c);
+    }
+
+    sum = (uint8_t) (sum + (uint8_t) ';');
+    uart_putc((uint8_t) ';');
+
+    rsp_send_packet_end(sum);
+}
+
 static bool rsp_parse_hex_byte(const char *p, uint8_t *out)
 {
     uint8_t hi = hex_nibble(p[0]);
@@ -320,7 +359,6 @@ static void handle_breakpoint(const char *p)
         rsp_send_err();
         return;
     }
-    (void) kind;
 
     if (type == 0 || type == 1) {
         bool ok = is_set ? cortex_breakpoint_insert(addr) : cortex_breakpoint_remove(addr);
@@ -332,7 +370,30 @@ static void handle_breakpoint(const char *p)
         return;
     }
 
-    // Watchpoints not implemented yet
+    if (type == 2 || type == 3 || type == 4) {
+        cortexm_watch_t wt = CORTEXM_WATCH_ACCESS;
+        if (type == 2) {
+            wt = CORTEXM_WATCH_WRITE;
+        } else if (type == 3) {
+            wt = CORTEXM_WATCH_READ;
+        } else {
+            wt = CORTEXM_WATCH_ACCESS;
+        }
+
+        if (!cortex_watchpoints_supported()) {
+            rsp_send_empty();
+            return;
+        }
+
+        bool ok = is_set ? cortex_watchpoint_insert(wt, addr, kind) : cortex_watchpoint_remove(wt, addr, kind);
+        if (ok) {
+            rsp_send_ok();
+        } else {
+            rsp_send_err();
+        }
+        return;
+    }
+
     rsp_send_empty();
 }
 
@@ -729,6 +790,12 @@ void rsp_poll(void)
     }
     if (halted) {
         rsp_running = false;
-        rsp_send_sigtrap();
+        cortexm_watch_t wt = CORTEXM_WATCH_ACCESS;
+        uint32_t        wa = 0;
+        if (cortex_watchpoint_hit(&wt, &wa)) {
+            rsp_send_trap_watchpoint(wt, wa);
+        } else {
+            rsp_send_sigtrap();
+        }
     }
 }

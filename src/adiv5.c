@@ -13,6 +13,9 @@
 #define DP_SELECT    0x08u // addr[3:2]=2
 #define DP_RDBUFF    0x0Cu // addr[3:2]=3
 
+static const uint32_t DP_ABORT_CLEAR_ERRORS =
+    (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3) | (1u << 4);
+
 static uint32_t g_dp_select = 0;
 
 bool adiv5_dp_read(uint8_t addr, uint32_t *out)
@@ -82,8 +85,7 @@ bool adiv5_init(void)
 
     // Clear errors and request debug power-up
     // ABORT: clear STKERR/STKCMP/STKORUN + WDERR/ORUN
-    (void) adiv5_dp_write(DP_ABORT,
-        (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3) | (1u << 4));
+    (void) adiv5_dp_write(DP_ABORT, DP_ABORT_CLEAR_ERRORS);
 
     // CTRL/STAT: set CDBGPWRUPREQ + CSYSPWRUPREQ
     // Bits: CDBGPWRUPREQ(28), CSYSPWRUPREQ(30)
@@ -106,3 +108,7 @@ bool adiv5_init(void)
     return true;
 }
 
+void adiv5_clear_errors(void)
+{
+    (void) adiv5_dp_write(DP_ABORT, DP_ABORT_CLEAR_ERRORS);
+}

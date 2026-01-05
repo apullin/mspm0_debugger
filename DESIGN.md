@@ -52,8 +52,11 @@ Targets:
 
 - C1104 tiny (recommended for “does it fit in 1KB SRAM?”):
   - `cmake -S . -B build_c1104 -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-gcc.cmake -DPROBE_DEVICE=MSPM0C1104 -DPROBE_TINY_RAM=ON`
-- C1105 bigger:
+- C1105 bigger (“full feature”):
   - `cmake -S . -B build_c1105 -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-gcc.cmake -DPROBE_DEVICE=MSPM0C1105 -DPROBE_TINY_RAM=OFF`
+    - Defaults to enabling `qXfer:features:read` target XML and DWT watchpoints; override with:
+      - `-DPROBE_ENABLE_QXFER_TARGET_XML=OFF`
+      - `-DPROBE_ENABLE_DWT_WATCHPOINTS=OFF`
 
 Then build:
 

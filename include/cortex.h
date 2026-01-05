@@ -10,9 +10,16 @@ typedef enum {
     CORTEXM_TARGET_M3,
     CORTEXM_TARGET_M4,
     CORTEXM_TARGET_M7,
+    CORTEXM_TARGET_M23,
     CORTEXM_TARGET_M33,
     CORTEXM_TARGET_M55,
 } cortexm_target_t;
+
+typedef enum {
+    CORTEXM_WATCH_WRITE = 0,
+    CORTEXM_WATCH_READ,
+    CORTEXM_WATCH_ACCESS,
+} cortexm_watch_t;
 
 // Detect target core/features (CPUID, etc.) and select the active target profile.
 void cortex_target_init(void);
@@ -36,3 +43,8 @@ bool cortex_write_core_reg(uint32_t regnum, uint32_t v);
 void cortex_breakpoints_init(void);
 bool cortex_breakpoint_insert(uint32_t addr);
 bool cortex_breakpoint_remove(uint32_t addr);
+
+bool cortex_watchpoints_supported(void);
+bool cortex_watchpoint_insert(cortexm_watch_t type, uint32_t addr, uint32_t len);
+bool cortex_watchpoint_remove(cortexm_watch_t type, uint32_t addr, uint32_t len);
+bool cortex_watchpoint_hit(cortexm_watch_t *out_type, uint32_t *out_addr);

@@ -23,8 +23,8 @@ bool probe_init(void)
 
     g_link_up = adiv5_init();
     if (g_link_up) {
-        (void) cortex_halt();
         cortex_target_init();
+        (void) cortex_halt();
         cortex_breakpoints_init();
     }
     return g_link_up;
