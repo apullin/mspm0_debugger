@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "cortex.h"
+#include "target.h"
 #include "hal.h"
 #include "target_mem.h"
 
@@ -184,12 +184,12 @@ static void rsp_send_sigtrap(void)
     rsp_send_packet_str("S05");
 }
 
-static void rsp_send_trap_watchpoint(cortexm_watch_t wt, uint32_t addr)
+static void rsp_send_trap_watchpoint(target_watch_t wt, uint32_t addr)
 {
     const char *tag = "watch";
-    if (wt == CORTEXM_WATCH_READ) {
+    if (wt == TARGET_WATCH_READ) {
         tag = "rwatch";
-    } else if (wt == CORTEXM_WATCH_ACCESS) {
+    } else if (wt == TARGET_WATCH_ACCESS) {
         tag = "awatch";
     }
 
@@ -361,7 +361,7 @@ static void handle_breakpoint(const char *p)
     }
 
     if (type == 0 || type == 1) {
-        bool ok = is_set ? cortex_breakpoint_insert(addr) : cortex_breakpoint_remove(addr);
+        bool ok = is_set ? target_breakpoint_insert(addr) : target_breakpoint_remove(addr);
         if (ok) {
             rsp_send_ok();
         } else {
@@ -371,21 +371,21 @@ static void handle_breakpoint(const char *p)
     }
 
     if (type == 2 || type == 3 || type == 4) {
-        cortexm_watch_t wt = CORTEXM_WATCH_ACCESS;
+        target_watch_t wt = TARGET_WATCH_ACCESS;
         if (type == 2) {
-            wt = CORTEXM_WATCH_WRITE;
+            wt = TARGET_WATCH_WRITE;
         } else if (type == 3) {
-            wt = CORTEXM_WATCH_READ;
+            wt = TARGET_WATCH_READ;
         } else {
-            wt = CORTEXM_WATCH_ACCESS;
+            wt = TARGET_WATCH_ACCESS;
         }
 
-        if (!cortex_watchpoints_supported()) {
+        if (!target_watchpoints_supported()) {
             rsp_send_empty();
             return;
         }
 
-        bool ok = is_set ? cortex_watchpoint_insert(wt, addr, kind) : cortex_watchpoint_remove(wt, addr, kind);
+        bool ok = is_set ? target_watchpoint_insert(wt, addr, kind) : target_watchpoint_remove(wt, addr, kind);
         if (ok) {
             rsp_send_ok();
         } else {
@@ -427,7 +427,7 @@ static void handle_qXfer_features_read(const char *p)
 
     const char *xml     = NULL;
     uint32_t    xml_len = 0;
-    if (!cortex_target_xml_get(&xml, &xml_len) || !xml) {
+    if (!target_xml_get(&xml, &xml_len) || !xml) {
         rsp_send_empty();
         return;
     }
@@ -462,11 +462,11 @@ static void rsp_handle_command(void)
 
     if (p[0] == 'g' && p[1] == '\0') {
         uint32_t regs[17];
-        if (!cortex_halt()) {
+        if (!target_halt()) {
             rsp_send_err();
             return;
         }
-        if (!cortex_read_gdb_regs(regs)) {
+        if (!target_read_gdb_regs(regs, 17)) {
             rsp_send_err();
             return;
         }
@@ -476,7 +476,7 @@ static void rsp_handle_command(void)
 
     if (p[0] == 'G') {
         uint32_t regs[17];
-        if (!cortex_halt()) {
+        if (!target_halt()) {
             rsp_send_err();
             return;
         }
@@ -484,7 +484,7 @@ static void rsp_handle_command(void)
             rsp_send_err();
             return;
         }
-        if (!cortex_write_gdb_regs(regs)) {
+        if (!target_write_gdb_regs(regs, 17)) {
             rsp_send_err();
             return;
         }
@@ -564,13 +564,13 @@ static void rsp_handle_command(void)
                 rsp_send_err();
                 return;
             }
-            if (!cortex_write_core_reg(15, addr)) {
+            if (!target_write_reg(15, addr)) {
                 rsp_send_err();
                 return;
             }
         }
 
-        if (!cortex_continue()) {
+        if (!target_continue()) {
             rsp_send_err();
             return;
         }
@@ -586,13 +586,13 @@ static void rsp_handle_command(void)
                 rsp_send_err();
                 return;
             }
-            if (!cortex_write_core_reg(15, addr)) {
+            if (!target_write_reg(15, addr)) {
                 rsp_send_err();
                 return;
             }
         }
 
-        if (!cortex_step()) {
+        if (!target_step()) {
             rsp_send_err();
             return;
         }
@@ -607,7 +607,7 @@ static void rsp_handle_command(void)
             return;
         }
 
-        if (!cortex_halt()) {
+        if (!target_halt()) {
             rsp_send_err();
             return;
         }
@@ -618,7 +618,7 @@ static void rsp_handle_command(void)
             core_reg = 16; // CPSR -> xPSR alias for M-profile
         }
         if (core_reg <= 16) {
-            if (!cortex_read_core_reg(core_reg, &val)) {
+            if (!target_read_reg(core_reg, &val)) {
                 rsp_send_err();
                 return;
             }
@@ -644,7 +644,7 @@ static void rsp_handle_command(void)
             return;
         }
 
-        if (!cortex_halt()) {
+        if (!target_halt()) {
             rsp_send_err();
             return;
         }
@@ -654,7 +654,7 @@ static void rsp_handle_command(void)
             core_reg = 16;
         }
         if (core_reg <= 16) {
-            if (!cortex_write_core_reg(core_reg, val)) {
+            if (!target_write_reg(core_reg, val)) {
                 rsp_send_err();
                 return;
             }
@@ -690,7 +690,7 @@ static void rsp_handle_command(void)
 
     if (p[0] == 'D' || p[0] == 'k') {
         rsp_running = false;
-        (void) cortex_continue();
+        (void) target_continue();
         rsp_send_ok();
         return;
     }
@@ -712,7 +712,7 @@ void rsp_process_byte(uint8_t c)
     // Ctrl-C (0x03) is out-of-band interrupt
     if (c == 0x03) {
         rsp_running = false;
-        (void) cortex_halt();
+        (void) target_halt();
         rsp_send_sigtrap();
         rsp_state = RSP_IDLE;
         rsp_len   = 0;
@@ -785,14 +785,14 @@ void rsp_poll(void)
         return;
     }
     bool halted = false;
-    if (!cortex_is_halted(&halted)) {
+    if (!target_is_halted(&halted)) {
         return;
     }
     if (halted) {
         rsp_running = false;
-        cortexm_watch_t wt = CORTEXM_WATCH_ACCESS;
+        target_watch_t wt = TARGET_WATCH_ACCESS;
         uint32_t        wa = 0;
-        if (cortex_watchpoint_hit(&wt, &wa)) {
+        if (target_watchpoint_hit(&wt, &wa)) {
             rsp_send_trap_watchpoint(wt, wa);
         } else {
             rsp_send_sigtrap();

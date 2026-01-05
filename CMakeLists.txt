@@ -79,6 +79,7 @@ add_executable(mspm0_debugger.elf
     src/swd_bitbang.c
     src/adiv5.c
     src/target_mem.c
+    src/target.c
     src/cortex.c
     ${PROBE_BOARD_SRC}
     ${PROBE_STARTUP_SRC}

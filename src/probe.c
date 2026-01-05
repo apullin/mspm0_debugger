@@ -5,9 +5,9 @@
 #include <stdint.h>
 
 #include "adiv5.h"
-#include "cortex.h"
 #include "hal.h"
 #include "rsp.h"
+#include "target.h"
 
 static bool g_link_up = false;
 
@@ -23,9 +23,9 @@ bool probe_init(void)
 
     g_link_up = adiv5_init();
     if (g_link_up) {
-        cortex_target_init();
-        (void) cortex_halt();
-        cortex_breakpoints_init();
+        target_init();
+        (void) target_halt();
+        target_breakpoints_init();
     }
     return g_link_up;
 }
