@@ -6,6 +6,7 @@ set(MSPM0_SDK_PATH "/Applications/ti/mspm0_sdk_2_08_00_03/" CACHE PATH "Path to 
 
 set(PROBE_DEVICE "MSPM0C1104" CACHE STRING "Probe MCU (MSPM0C1104 or MSPM0C1105)")
 set(PROBE_UART_BAUD "115200" CACHE STRING "UART baud rate for GDB RSP")
+set(PROBE_SWD_DELAY_US "0" CACHE STRING "Microseconds delay per SWD clock cycle (0=max speed, increase for slow targets/long wires)")
 option(PROBE_TINY_RAM "Minimize static RAM usage (smaller RSP buffers)" ON)
 option(PROBE_ENABLE_SYSOSC_FCL "Enable SYSOSC Frequency Correction Loop (FCL) at boot (may require ROSC resistor; locks until BOOTRST)" OFF)
 
@@ -90,6 +91,7 @@ target_compile_definitions(mspm0_debugger.elf PRIVATE
     ${PROBE_DEVICE_DEFINE}
     PROBE_UART_BAUD=${PROBE_UART_BAUD}
     PROBE_CORE_CLK_HZ=${PROBE_CORE_CLK_HZ}
+    SWD_DELAY_US=${PROBE_SWD_DELAY_US}
 )
 
 if(PROBE_ENABLE_SYSOSC_FCL)
