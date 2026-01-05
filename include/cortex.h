@@ -24,6 +24,7 @@ typedef enum {
 // Detect target core/features (CPUID, etc.) and select the active target profile.
 void cortex_target_init(void);
 cortexm_target_t cortex_target_get(void);
+bool cortex_is_connected(void);
 
 // Optional: GDB target description (qXfer:features:read).
 // Returns false if not supported/disabled at build-time.

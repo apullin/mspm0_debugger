@@ -381,6 +381,8 @@ void cortex_target_init(void)
 
 cortexm_target_t cortex_target_get(void) { return g_target; }
 
+bool cortex_is_connected(void) { return g_target != CORTEXM_TARGET_UNKNOWN; }
+
 bool cortex_target_xml_get(const char **out_xml, uint32_t *out_len)
 {
 #if defined(PROBE_ENABLE_QXFER_TARGET_XML) && (PROBE_ENABLE_QXFER_TARGET_XML)
