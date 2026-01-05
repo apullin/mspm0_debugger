@@ -66,9 +66,20 @@ void board_init(void)
     DL_GPIO_initPeripheralInputFunction(PROBE_UART_RX_IOMUX, PROBE_UART_RX_IOMUX_FUNC);
 
     // SWD pins
+    // SWCLK: standard push-pull output
     DL_GPIO_initDigitalOutput(PROBE_SWCLK_IOMUX);
-    DL_GPIO_initDigitalOutput(PROBE_SWDIO_IOMUX);
-    DL_GPIO_initDigitalOutput(PROBE_NRESET_IOMUX);
+    // SWDIO: open-drain (Hi-Z) with internal pull-up for bidirectional SWD
+    DL_GPIO_initDigitalOutputFeatures(PROBE_SWDIO_IOMUX,
+        DL_GPIO_INVERSION_DISABLE,
+        DL_GPIO_RESISTOR_PULL_UP,
+        DL_GPIO_DRIVE_STRENGTH_LOW,
+        DL_GPIO_HIZ_ENABLE);
+    // NRESET: open-drain with pull-up (active low reset)
+    DL_GPIO_initDigitalOutputFeatures(PROBE_NRESET_IOMUX,
+        DL_GPIO_INVERSION_DISABLE,
+        DL_GPIO_RESISTOR_PULL_UP,
+        DL_GPIO_DRIVE_STRENGTH_LOW,
+        DL_GPIO_HIZ_ENABLE);
 
     DL_GPIO_enableOutput(PROBE_SWD_PORT, PROBE_SWCLK_PIN | PROBE_SWDIO_PIN | PROBE_NRESET_PIN);
 
