@@ -10,6 +10,10 @@ set(PROBE_SWD_DELAY_US "0" CACHE STRING "Microseconds delay per SWD clock cycle 
 option(PROBE_TINY_RAM "Minimize static RAM usage (smaller RSP buffers)" ON)
 option(PROBE_ENABLE_SYSOSC_FCL "Enable SYSOSC Frequency Correction Loop (FCL) at boot (may require ROSC resistor; locks until BOOTRST)" OFF)
 
+# HFXT crystal support (C1105/C1106 only - C1104 has no HFXT hardware)
+option(PROBE_USE_HFXT "Use external HFXT crystal for MCLK (C1105 only; requires crystal on HFXIN/HFXOUT pins)" OFF)
+set(PROBE_HFXT_FREQ_HZ "32000000" CACHE STRING "HFXT crystal frequency in Hz (used when PROBE_USE_HFXT=ON)")
+
 set(_probe_full_feature_default OFF)
 if(NOT PROBE_TINY_RAM)
     set(_probe_full_feature_default ON)
@@ -96,6 +100,21 @@ target_compile_definitions(mspm0_debugger.elf PRIVATE
 
 if(PROBE_ENABLE_SYSOSC_FCL)
     target_compile_definitions(mspm0_debugger.elf PRIVATE PROBE_ENABLE_SYSOSC_FCL=1)
+endif()
+
+if(PROBE_USE_HFXT)
+    if(NOT PROBE_DEVICE STREQUAL "MSPM0C1105")
+        message(FATAL_ERROR "PROBE_USE_HFXT=ON requires PROBE_DEVICE=MSPM0C1105 (C1104 has no HFXT hardware)")
+    endif()
+    # When using HFXT, core clock = crystal frequency
+    if(NOT PROBE_CORE_CLK_HZ STREQUAL PROBE_HFXT_FREQ_HZ)
+        message(STATUS "PROBE_USE_HFXT=ON: overriding PROBE_CORE_CLK_HZ=${PROBE_CORE_CLK_HZ} -> ${PROBE_HFXT_FREQ_HZ}")
+        set(PROBE_CORE_CLK_HZ "${PROBE_HFXT_FREQ_HZ}" CACHE STRING "Probe core clock frequency in Hz" FORCE)
+    endif()
+    target_compile_definitions(mspm0_debugger.elf PRIVATE
+        PROBE_USE_HFXT=1
+        PROBE_HFXT_FREQ_HZ=${PROBE_HFXT_FREQ_HZ}
+    )
 endif()
 
 if(PROBE_ENABLE_QXFER_TARGET_XML)

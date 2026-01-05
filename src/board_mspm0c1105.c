@@ -32,6 +32,12 @@
 #define PROBE_SWDIO_IOMUX          (IOMUX_PINCM2)
 #define PROBE_NRESET_IOMUX         (IOMUX_PINCM3)
 
+#if defined(PROBE_USE_HFXT) && (PROBE_USE_HFXT)
+// HFXT crystal pins: PA5=HFXIN, PA6=HFXOUT (adjust when schematic is set)
+#define PROBE_HFXIN_IOMUX          (IOMUX_PINCM6)
+#define PROBE_HFXOUT_IOMUX         (IOMUX_PINCM7)
+#endif
+
 static void systick_init_free_running(void)
 {
     SysTick->CTRL = 0;
@@ -60,6 +66,26 @@ void board_init(void)
     // SYSOSC Frequency Correction Loop (FCL). See `docs/slau893c.md` section 2.3.1.2.1.
     // Note: enabling FCL is sticky until BOOTRST; hardware may require an ROSC resistor depending on device.
     DL_SYSCTL_enableSYSOSCFCL();
+#endif
+
+#if defined(PROBE_USE_HFXT) && (PROBE_USE_HFXT)
+    // Configure HFXT crystal pins (disable digital IO on HFXIN/HFXOUT)
+    IOMUX->SECCFG.PINCM[PROBE_HFXIN_IOMUX] = IOMUX_PINCM_PC_UNCONNECTED;
+    IOMUX->SECCFG.PINCM[PROBE_HFXOUT_IOMUX] = IOMUX_PINCM_PC_UNCONNECTED;
+
+    // Select HFXT frequency range based on crystal frequency
+#if (PROBE_HFXT_FREQ_HZ <= 8000000)
+    DL_SYSCTL_setHFCLKSourceHFXT(DL_SYSCTL_HFXT_RANGE_4_8_MHZ);
+#elif (PROBE_HFXT_FREQ_HZ <= 16000000)
+    DL_SYSCTL_setHFCLKSourceHFXT(DL_SYSCTL_HFXT_RANGE_8_16_MHZ);
+#elif (PROBE_HFXT_FREQ_HZ <= 32000000)
+    DL_SYSCTL_setHFCLKSourceHFXT(DL_SYSCTL_HFXT_RANGE_16_32_MHZ);
+#else
+    DL_SYSCTL_setHFCLKSourceHFXT(DL_SYSCTL_HFXT_RANGE_32_48_MHZ);
+#endif
+
+    // Switch MCLK from SYSOSC to HSCLK (HFXT)
+    DL_SYSCTL_switchMCLKfromSYSOSCtoHSCLK();
 #endif
 
     // UART pins
