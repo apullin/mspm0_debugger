@@ -38,8 +38,6 @@ Current focus is the MSPM0C1 series:
 
 The original L-series notes are considered deprecated for this repo’s current direction.
 
-Reference manual conversion lives at `docs/slau847e.md`.
-
 ## BUILD SYSTEM
 
 Toolchain: `arm-none-eabi-gcc` via `cmake/toolchains/arm-gcc.cmake`.
