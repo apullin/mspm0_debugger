@@ -2,7 +2,7 @@
 
 ## Goals & Intent
 
-This repo builds a tiny GDB Remote Serial Protocol (RSP) probe firmware that speaks SWD to Cortex‑M targets and talks to GDB over UART.
+This repo builds a tiny GDB Remote Serial Protocol (RSP) probe firmware that speaks SWD to Cortex‑M targets (and optionally JTAG to RISC-V targets) and talks to GDB over UART.
 The goal here is to implement a debugger probe on an ultra-low cost part, targeting the <$0.20 MSPM0 for the smallest build.
 
 "But an RP2350 is only $0.70!" ... sure. I still wanted to this self-contained, and in silicon made by an American company.
@@ -11,16 +11,26 @@ The goal here is to implement a debugger probe on an ultra-low cost part, target
 
 Some of the smallest parts are selected, which sets us RAM and Flash budgets:
 
-- [MSPM0C1104](https://www.ti.com/product/MSPM0C1104) (“tiny”): 16KB flash / 1KB SRAM / 24 MHz SYSOSC / $0.195@1ku
-- [MSPM0C1105](https://www.ti.com/product/MSPM0C1105) (“full”): 32KB flash / 8KB SRAM / 32 MHz SYSOSC / $0.376@1ku
+- [MSPM0C1104](https://www.ti.com/product/MSPM0C1104) ("tiny"): 16KB flash / 1KB SRAM / 24 MHz SYSOSC / $0.195@1ku
+- [MSPM0C1105](https://www.ti.com/product/MSPM0C1105) ("full"): 32KB flash / 8KB SRAM / 32 MHz SYSOSC / $0.376@1ku
 
 Pinning is not yet finalized. 16-pin parts may be viable, TODO.
 
-## Supported Cortex-M Cores
+## Supported Debug Targets
+
+### Cortex-M (SWD) - Default
 
 Default target-core support (can be compiled out with `PROBE_TARGET_*` options):
 - M0, M0+, M3, M4, M7, M23, M33, M55
 - Detection is CPUID-based at attach time
+
+### RISC-V (JTAG) - Optional
+
+Optional RISC-V debug support via JTAG (`-DPROBE_ENABLE_JTAG=ON -DPROBE_ENABLE_RISCV=ON`):
+- RV32 targets via Debug Spec 0.13
+- Abstract Commands for register access
+- System Bus Access for memory read/write
+- Can be built standalone or alongside Cortex-M (runtime auto-detection)
 
 ## Build Profiles
 
@@ -38,21 +48,40 @@ Please note that exact pinning is not yet finalized, as I have not done a schema
 
 ## Feature Set
 
-Core features (all builds):
+### Cortex-M (default)
+
 - SWD over bit‑banged GPIO (ADIv5 DP/AP + MEM‑AP)
 - Cortex‑M halt/run/step, register access (`g/G`, `p/P`), memory read/write (`m/M`)
 - Hardware breakpoints via FPB (`Z0/z0`, `Z1/z1`)
 - Basic stop replies and `qSupported`
 
-Optional in “full” builds:
+Optional Cortex-M features (in "full" builds):
 - `qXfer:features:read` target XML (`PROBE_ENABLE_QXFER_TARGET_XML`)
 - DWT watchpoints (`Z2/Z3/Z4`, `PROBE_ENABLE_DWT_WATCHPOINTS`)
 
+### RISC-V (optional, requires `-DPROBE_ENABLE_JTAG=ON -DPROBE_ENABLE_RISCV=ON`)
+
+- JTAG bit-bang wire protocol (IEEE 1149.1 TAP state machine)
+- RISC-V Debug Spec 0.13 via DMI (Debug Module Interface)
+- RV32 halt/run/step, GPR + PC access, memory read/write
+- System Bus Access (SBA) for efficient memory operations
+- Runtime auto-detection when built alongside Cortex-M
+
 ## Reported Build Sizes (approx)
 
-Latest local builds:
-- **C1104 tiny**: ~7.5 KB flash, ~720 B static SRAM
-- **C1105 full**: ~12.8 KB flash, ~1.36 KB static SRAM
+Latest local builds (C1105, `PROBE_TINY_RAM=OFF`):
+
+| Configuration | Flash | SRAM |
+|---------------|-------|------|
+| Cortex-M only (default) | 13.5 KB (41%) | 1.4 KB (17%) |
+| RISC-V only | 8.7 KB (27%) | 1.2 KB (15%) |
+| Dual (Cortex-M + RISC-V) | 16.2 KB (49%) | 1.4 KB (17%) |
+
+Tiny build (C1104, `PROBE_TINY_RAM=ON`, Cortex-M only):
+
+| Configuration | Flash | SRAM |
+|---------------|-------|------|
+| C1104 tiny | 8.2 KB (50%) | 728 B (71%) |
 
 ## Requirements
 
@@ -78,9 +107,32 @@ cmake -S . -B build_c1105 -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-gcc.cmake 
 cmake --build build_c1105 -j
 ```
 
-Optional feature toggles:
-- `-DPROBE_ENABLE_QXFER_TARGET_XML=OFF`
-- `-DPROBE_ENABLE_DWT_WATCHPOINTS=OFF`
+RISC-V only build (ultra-minimal, no Cortex-M):
+```
+cmake -S . -B build_rv -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-gcc.cmake -DPROBE_DEVICE=MSPM0C1105 -DPROBE_ENABLE_CORTEXM=OFF -DPROBE_ENABLE_JTAG=ON -DPROBE_ENABLE_RISCV=ON
+cmake --build build_rv -j
+```
+
+Dual architecture build (Cortex-M + RISC-V with runtime detection):
+```
+cmake -S . -B build_dual -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-gcc.cmake -DPROBE_DEVICE=MSPM0C1105 -DPROBE_ENABLE_JTAG=ON -DPROBE_ENABLE_RISCV=ON
+cmake --build build_dual -j
+```
+
+### Architecture Options
+
+- `-DPROBE_ENABLE_CORTEXM=ON` (default) - Enable Cortex-M debug via SWD
+- `-DPROBE_ENABLE_JTAG=OFF` - Enable JTAG bit-bang wire protocol
+- `-DPROBE_ENABLE_RISCV=OFF` - Enable RISC-V debug (requires JTAG)
+
+At least one of `PROBE_ENABLE_CORTEXM` or `PROBE_ENABLE_RISCV` must be enabled.
+
+### Other Feature Toggles
+
+- `-DPROBE_ENABLE_QXFER_TARGET_XML=OFF` - Disable target XML
+- `-DPROBE_ENABLE_DWT_WATCHPOINTS=OFF` - Disable DWT watchpoints
+- `-DPROBE_SWD_DELAY_US=0` - SWD clock delay (increase for slow targets)
+- `-DPROBE_USE_HFXT=ON` - Use external crystal (C1105 only)
 
 ## Usage (GDB)
 
@@ -123,7 +175,7 @@ External clocks (for higher accuracy or PLL):
 
 ## Notes
 
-- The probe firmware is MSPM0‑specific, but the target side is generic Cortex‑M over SWD.
+- The probe firmware is MSPM0‑specific, but the target side is generic Cortex‑M over SWD (or RISC-V over JTAG).
 - Build outputs: `mspm0_debugger.elf`, `.hex`, `.bin`, and `mspm0_debugger.map`.
 
 ## Licensing
