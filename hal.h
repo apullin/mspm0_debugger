@@ -19,3 +19,12 @@ void swdio_dir_in(void);
 
 // Optional but strongly recommended
 void nreset_write(int level);  // target reset pin, 0/1
+
+// GPIO for JTAG (optional, for RISC-V targets)
+// Note: TCK can share with SWCLK, TMS can share with SWDIO in some configurations.
+#if defined(PROBE_ENABLE_JTAG) && (PROBE_ENABLE_JTAG)
+void jtag_tck_write(int level);   // clock, 0/1
+void jtag_tms_write(int level);   // mode select, 0/1
+void jtag_tdi_write(int level);   // data to target, 0/1
+int  jtag_tdo_read(void);         // data from target, returns 0/1
+#endif

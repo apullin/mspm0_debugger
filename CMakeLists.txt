@@ -30,6 +30,11 @@ option(PROBE_TARGET_M7 "Support Cortex-M7 debug targets" ON)
 option(PROBE_TARGET_M23 "Support Cortex-M23 debug targets" ON)
 option(PROBE_TARGET_M33 "Support Cortex-M33 debug targets" ON)
 option(PROBE_TARGET_M55 "Support Cortex-M55 debug targets" ON)
+
+# JTAG/RISC-V support (optional, C1105 only due to flash size)
+option(PROBE_ENABLE_JTAG "Enable JTAG bit-bang wire protocol (for RISC-V targets)" OFF)
+option(PROBE_ENABLE_RISCV "Enable RISC-V debug target support (requires JTAG)" OFF)
+
 set(RSP_MAX_PAYLOAD "512" CACHE STRING "Max RSP payload bytes")
 set(RSP_PACKET_SIZE_HEX "200" CACHE STRING "RSP qSupported PacketSize (hex, bytes)")
 set(RSP_IOBUF_SIZE "256" CACHE STRING "Max bytes buffered for m/M operations")
@@ -124,6 +129,19 @@ endif()
 
 if(PROBE_ENABLE_DWT_WATCHPOINTS)
     target_compile_definitions(mspm0_debugger.elf PRIVATE PROBE_ENABLE_DWT_WATCHPOINTS=1)
+endif()
+
+if(PROBE_ENABLE_JTAG)
+    target_sources(mspm0_debugger.elf PRIVATE src/jtag_bitbang.c)
+    target_compile_definitions(mspm0_debugger.elf PRIVATE PROBE_ENABLE_JTAG=1)
+endif()
+
+if(PROBE_ENABLE_RISCV)
+    if(NOT PROBE_ENABLE_JTAG)
+        message(FATAL_ERROR "PROBE_ENABLE_RISCV=ON requires PROBE_ENABLE_JTAG=ON")
+    endif()
+    target_sources(mspm0_debugger.elf PRIVATE src/riscv.c)
+    target_compile_definitions(mspm0_debugger.elf PRIVATE PROBE_ENABLE_RISCV=1)
 endif()
 
 if(PROBE_TARGET_M0)
