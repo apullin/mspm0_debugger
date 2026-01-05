@@ -72,7 +72,7 @@ bool target_mem_write_word(uint32_t addr, uint32_t v)
     return target_mem_write_word_ap(g_memap_ap_sel, addr, v);
 }
 
-bool target_mem_read_bytes(uint32_t addr, uint8_t *buf, uint32_t len)
+bool target_mem_read_bytes_impl(uint32_t addr, uint8_t *buf, uint32_t len)
 {
     while (len) {
         uint32_t aligned = addr & ~3u;
@@ -89,7 +89,7 @@ bool target_mem_read_bytes(uint32_t addr, uint8_t *buf, uint32_t len)
     return true;
 }
 
-bool target_mem_write_bytes(uint32_t addr, const uint8_t *buf, uint32_t len)
+bool target_mem_write_bytes_impl(uint32_t addr, const uint8_t *buf, uint32_t len)
 {
     while (len) {
         uint32_t offset = addr & 3u;

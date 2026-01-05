@@ -46,6 +46,10 @@ bool target_watchpoint_insert(target_watch_t type, uint32_t addr, uint32_t len);
 bool target_watchpoint_remove(target_watch_t type, uint32_t addr, uint32_t len);
 bool target_watchpoint_hit(target_watch_t *out_type, uint32_t *out_addr);
 
+// Memory access
+bool target_mem_read_bytes(uint32_t addr, uint8_t *buf, uint32_t len);
+bool target_mem_write_bytes(uint32_t addr, const uint8_t *buf, uint32_t len);
+
 // Optional: GDB target description XML (qXfer:features:read)
 // Returns false if not supported or disabled at build time.
 bool target_xml_get(const char **out_xml, uint32_t *out_len);

@@ -9,7 +9,6 @@
 
 #include "target.h"
 #include "hal.h"
-#include "target_mem.h"
 
 #ifndef PROBE_TINY_RAM
 #define PROBE_TINY_RAM 0

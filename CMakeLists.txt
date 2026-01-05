@@ -22,7 +22,17 @@ endif()
 option(PROBE_ENABLE_QXFER_TARGET_XML "Serve GDB target XML via qXfer:features:read (target.xml; helps support multiple Cortex-M variants)" ${_probe_full_feature_default})
 option(PROBE_ENABLE_DWT_WATCHPOINTS "Enable DWT watchpoints (Z2/Z3/Z4) when supported by the target" ${_probe_full_feature_default})
 
-# Target-core support (the probe MCU is set by PROBE_DEVICE; these options describe the *debug target* CPU family).
+# Target architecture support (compile-time selection)
+option(PROBE_ENABLE_CORTEXM "Enable Cortex-M debug target support (SWD)" ON)
+option(PROBE_ENABLE_JTAG "Enable JTAG bit-bang wire protocol (for RISC-V targets)" OFF)
+option(PROBE_ENABLE_RISCV "Enable RISC-V debug target support (requires JTAG)" OFF)
+
+# At least one target architecture must be enabled
+if(NOT PROBE_ENABLE_CORTEXM AND NOT PROBE_ENABLE_RISCV)
+    message(FATAL_ERROR "At least one target architecture must be enabled (PROBE_ENABLE_CORTEXM or PROBE_ENABLE_RISCV)")
+endif()
+
+# Cortex-M sub-options (only relevant when PROBE_ENABLE_CORTEXM=ON)
 option(PROBE_TARGET_M0 "Support Cortex-M0 debug targets" ON)
 option(PROBE_TARGET_M3 "Support Cortex-M3 debug targets" ON)
 option(PROBE_TARGET_M4 "Support Cortex-M4 debug targets" ON)
@@ -30,10 +40,6 @@ option(PROBE_TARGET_M7 "Support Cortex-M7 debug targets" ON)
 option(PROBE_TARGET_M23 "Support Cortex-M23 debug targets" ON)
 option(PROBE_TARGET_M33 "Support Cortex-M33 debug targets" ON)
 option(PROBE_TARGET_M55 "Support Cortex-M55 debug targets" ON)
-
-# JTAG/RISC-V support (optional, C1105 only due to flash size)
-option(PROBE_ENABLE_JTAG "Enable JTAG bit-bang wire protocol (for RISC-V targets)" OFF)
-option(PROBE_ENABLE_RISCV "Enable RISC-V debug target support (requires JTAG)" OFF)
 
 set(RSP_MAX_PAYLOAD "512" CACHE STRING "Max RSP payload bytes")
 set(RSP_PACKET_SIZE_HEX "200" CACHE STRING "RSP qSupported PacketSize (hex, bytes)")
@@ -81,14 +87,21 @@ add_executable(mspm0_debugger.elf
     main.c
     src/probe.c
     src/rsp.c
-    src/swd_bitbang.c
-    src/adiv5.c
-    src/target_mem.c
     src/target.c
-    src/cortex.c
     ${PROBE_BOARD_SRC}
     ${PROBE_STARTUP_SRC}
 )
+
+# Cortex-M sources (SWD, ADIv5, memory access, core debug)
+if(PROBE_ENABLE_CORTEXM)
+    target_sources(mspm0_debugger.elf PRIVATE
+        src/swd_bitbang.c
+        src/adiv5.c
+        src/target_mem.c
+        src/cortex.c
+    )
+    target_compile_definitions(mspm0_debugger.elf PRIVATE PROBE_ENABLE_CORTEXM=1)
+endif()
 
 target_include_directories(mspm0_debugger.elf PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -144,26 +157,29 @@ if(PROBE_ENABLE_RISCV)
     target_compile_definitions(mspm0_debugger.elf PRIVATE PROBE_ENABLE_RISCV=1)
 endif()
 
-if(PROBE_TARGET_M0)
-    target_compile_definitions(mspm0_debugger.elf PRIVATE PROBE_TARGET_M0=1)
-endif()
-if(PROBE_TARGET_M3)
-    target_compile_definitions(mspm0_debugger.elf PRIVATE PROBE_TARGET_M3=1)
-endif()
-if(PROBE_TARGET_M4)
-    target_compile_definitions(mspm0_debugger.elf PRIVATE PROBE_TARGET_M4=1)
-endif()
-if(PROBE_TARGET_M7)
-    target_compile_definitions(mspm0_debugger.elf PRIVATE PROBE_TARGET_M7=1)
-endif()
-if(PROBE_TARGET_M23)
-    target_compile_definitions(mspm0_debugger.elf PRIVATE PROBE_TARGET_M23=1)
-endif()
-if(PROBE_TARGET_M33)
-    target_compile_definitions(mspm0_debugger.elf PRIVATE PROBE_TARGET_M33=1)
-endif()
-if(PROBE_TARGET_M55)
-    target_compile_definitions(mspm0_debugger.elf PRIVATE PROBE_TARGET_M55=1)
+# Cortex-M variant support (only when PROBE_ENABLE_CORTEXM=ON)
+if(PROBE_ENABLE_CORTEXM)
+    if(PROBE_TARGET_M0)
+        target_compile_definitions(mspm0_debugger.elf PRIVATE PROBE_TARGET_M0=1)
+    endif()
+    if(PROBE_TARGET_M3)
+        target_compile_definitions(mspm0_debugger.elf PRIVATE PROBE_TARGET_M3=1)
+    endif()
+    if(PROBE_TARGET_M4)
+        target_compile_definitions(mspm0_debugger.elf PRIVATE PROBE_TARGET_M4=1)
+    endif()
+    if(PROBE_TARGET_M7)
+        target_compile_definitions(mspm0_debugger.elf PRIVATE PROBE_TARGET_M7=1)
+    endif()
+    if(PROBE_TARGET_M23)
+        target_compile_definitions(mspm0_debugger.elf PRIVATE PROBE_TARGET_M23=1)
+    endif()
+    if(PROBE_TARGET_M33)
+        target_compile_definitions(mspm0_debugger.elf PRIVATE PROBE_TARGET_M33=1)
+    endif()
+    if(PROBE_TARGET_M55)
+        target_compile_definitions(mspm0_debugger.elf PRIVATE PROBE_TARGET_M55=1)
+    endif()
 endif()
 
 if(PROBE_TINY_RAM)
