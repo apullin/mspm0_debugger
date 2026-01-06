@@ -7,6 +7,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "target.h"  // for target_watch_t
+
 // Initialize RISC-V debug (JTAG init, read IDCODE/DTMCS, probe DM).
 // Returns true if a valid RISC-V debug target is found.
 bool riscv_init(void);
@@ -45,3 +47,13 @@ bool riscv_mem_write(uint32_t addr, const uint8_t *buf, uint32_t len);
 // Get stop reason after halt.
 // Returns GDB signal number (e.g., 5 for SIGTRAP).
 uint8_t riscv_stop_reason(void);
+
+// Hardware breakpoints via trigger module.
+bool riscv_breakpoint_insert(uint32_t addr);
+bool riscv_breakpoint_remove(uint32_t addr);
+
+// Hardware watchpoints via trigger module.
+bool riscv_watchpoints_supported(void);
+bool riscv_watchpoint_insert(target_watch_t type, uint32_t addr, uint32_t len);
+bool riscv_watchpoint_remove(target_watch_t type, uint32_t addr, uint32_t len);
+bool riscv_watchpoint_hit(target_watch_t *out_type, uint32_t *out_addr);

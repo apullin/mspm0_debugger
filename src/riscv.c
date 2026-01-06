@@ -9,6 +9,7 @@
 
 #include "hal.h"
 #include "jtag.h"
+#include "target.h"  // for target_watch_t
 
 // Debug Module registers (DMI addresses)
 #define DM_DATA0        0x04u
@@ -87,8 +88,39 @@
 #define CMDERR_BUS          5u
 #define CMDERR_OTHER        7u
 
+// Trigger Module CSR addresses
+#define CSR_TSELECT     0x7A0u
+#define CSR_TDATA1      0x7A1u
+#define CSR_TDATA2      0x7A2u
+
+// mcontrol (tdata1 type=2) bit fields for RV32
+#define MCONTROL_TYPE_MCONTROL  (2u << 28)
+#define MCONTROL_DMODE          (1u << 27)
+#define MCONTROL_HIT            (1u << 20)
+#define MCONTROL_ACTION_DEBUG   (1u << 12)
+#define MCONTROL_M              (1u << 6)
+#define MCONTROL_U              (1u << 3)
+#define MCONTROL_EXECUTE        (1u << 2)
+#define MCONTROL_STORE          (1u << 1)
+#define MCONTROL_LOAD           (1u << 0)
+
 // Timeout for operations (microseconds)
 #define DM_TIMEOUT_US       100000u
+
+// Maximum hardware triggers to probe
+#define RISCV_MAX_TRIGGERS  4u
+
+// Trigger slot tracking
+typedef struct {
+    uint32_t addr;
+    uint8_t  type;   // 0=unused, 1=breakpoint, 2=watchpoint
+    uint8_t  watch;  // TARGET_WATCH_WRITE/READ/ACCESS
+    bool     used;
+} riscv_trigger_t;
+
+static riscv_trigger_t g_triggers[RISCV_MAX_TRIGGERS];
+static uint8_t g_num_triggers = 0;
+static bool g_triggers_probed = false;
 
 static bool g_dm_active = false;
 static uint8_t g_progbuf_size = 0;
@@ -144,6 +176,53 @@ static bool dm_exec_abstract(uint32_t cmd, uint32_t *data0_out)
     }
 
     return true;
+}
+
+// CSR read/write via Abstract Commands
+static bool riscv_read_csr(uint32_t csr, uint32_t *val)
+{
+    uint32_t cmd = (AC_ACCESS_REGISTER << 24) | AC_AR_AARSIZE_32 |
+                   AC_AR_TRANSFER | AC_AR_REGNO(csr);
+    return dm_exec_abstract(cmd, val);
+}
+
+static bool riscv_write_csr(uint32_t csr, uint32_t val)
+{
+    if (!jtag_dmi_write(DM_DATA0, val)) return false;
+    uint32_t cmd = (AC_ACCESS_REGISTER << 24) | AC_AR_AARSIZE_32 |
+                   AC_AR_TRANSFER | AC_AR_WRITE | AC_AR_REGNO(csr);
+    return dm_exec_abstract(cmd, NULL);
+}
+
+// Probe available triggers
+static bool riscv_triggers_init(void)
+{
+    if (g_triggers_probed) return g_num_triggers > 0;
+    g_triggers_probed = true;
+    g_num_triggers = 0;
+
+    // Clear all slots
+    for (uint8_t i = 0; i < RISCV_MAX_TRIGGERS; i++) {
+        g_triggers[i].used = false;
+    }
+
+    // Probe triggers by writing to tselect
+    for (uint8_t i = 0; i < RISCV_MAX_TRIGGERS; i++) {
+        if (!riscv_write_csr(CSR_TSELECT, i)) break;
+
+        uint32_t sel;
+        if (!riscv_read_csr(CSR_TSELECT, &sel)) break;
+        if (sel != i) break;  // Not as many triggers
+
+        uint32_t tdata1;
+        if (!riscv_read_csr(CSR_TDATA1, &tdata1)) break;
+        uint32_t type = (tdata1 >> 28) & 0xFu;
+        if (type == 0) break;  // No trigger at this index
+
+        g_num_triggers = i + 1;
+    }
+
+    return g_num_triggers > 0;
 }
 
 bool riscv_init(void)
@@ -550,6 +629,139 @@ uint8_t riscv_stop_reason(void)
         default:
             return 5;  // SIGTRAP
     }
+}
+
+// Breakpoint support via trigger module
+bool riscv_breakpoint_insert(uint32_t addr)
+{
+    if (!g_dm_active) return false;
+    if (!riscv_triggers_init()) return false;
+
+    // Check if already installed
+    for (uint8_t i = 0; i < g_num_triggers; i++) {
+        if (g_triggers[i].used && g_triggers[i].type == 1 &&
+            g_triggers[i].addr == addr) {
+            return true;  // Already set
+        }
+    }
+
+    // Find free slot
+    for (uint8_t i = 0; i < g_num_triggers; i++) {
+        if (!g_triggers[i].used) {
+            // Configure trigger: select, disable, set addr, enable
+            if (!riscv_write_csr(CSR_TSELECT, i)) return false;
+            if (!riscv_write_csr(CSR_TDATA1, 0)) return false;  // Disable first
+            if (!riscv_write_csr(CSR_TDATA2, addr)) return false;
+
+            uint32_t cfg = MCONTROL_TYPE_MCONTROL | MCONTROL_DMODE |
+                           MCONTROL_ACTION_DEBUG | MCONTROL_M |
+                           MCONTROL_U | MCONTROL_EXECUTE;
+            if (!riscv_write_csr(CSR_TDATA1, cfg)) return false;
+
+            g_triggers[i].addr = addr;
+            g_triggers[i].type = 1;  // breakpoint
+            g_triggers[i].used = true;
+            return true;
+        }
+    }
+    return false;  // No free slots
+}
+
+bool riscv_breakpoint_remove(uint32_t addr)
+{
+    if (!g_dm_active) return true;
+
+    for (uint8_t i = 0; i < g_num_triggers; i++) {
+        if (g_triggers[i].used && g_triggers[i].type == 1 &&
+            g_triggers[i].addr == addr) {
+            riscv_write_csr(CSR_TSELECT, i);
+            riscv_write_csr(CSR_TDATA1, 0);  // Disable
+            g_triggers[i].used = false;
+            return true;
+        }
+    }
+    return true;  // Safe to remove non-existent
+}
+
+// Watchpoint support via trigger module
+bool riscv_watchpoints_supported(void)
+{
+    if (!g_dm_active) return false;
+    return riscv_triggers_init() && g_num_triggers > 0;
+}
+
+bool riscv_watchpoint_insert(target_watch_t type, uint32_t addr, uint32_t len)
+{
+    (void)len;  // RISC-V triggers don't support length directly
+    if (!g_dm_active) return false;
+    if (!riscv_triggers_init()) return false;
+
+    // Find free slot
+    for (uint8_t i = 0; i < g_num_triggers; i++) {
+        if (!g_triggers[i].used) {
+            if (!riscv_write_csr(CSR_TSELECT, i)) return false;
+            if (!riscv_write_csr(CSR_TDATA1, 0)) return false;
+            if (!riscv_write_csr(CSR_TDATA2, addr)) return false;
+
+            uint32_t cfg = MCONTROL_TYPE_MCONTROL | MCONTROL_DMODE |
+                           MCONTROL_ACTION_DEBUG | MCONTROL_M | MCONTROL_U;
+
+            if (type == TARGET_WATCH_WRITE) {
+                cfg |= MCONTROL_STORE;
+            } else if (type == TARGET_WATCH_READ) {
+                cfg |= MCONTROL_LOAD;
+            } else {  // ACCESS
+                cfg |= MCONTROL_LOAD | MCONTROL_STORE;
+            }
+
+            if (!riscv_write_csr(CSR_TDATA1, cfg)) return false;
+
+            g_triggers[i].addr = addr;
+            g_triggers[i].type = 2;  // watchpoint
+            g_triggers[i].watch = (uint8_t)type;
+            g_triggers[i].used = true;
+            return true;
+        }
+    }
+    return false;  // No free slots
+}
+
+bool riscv_watchpoint_remove(target_watch_t type, uint32_t addr, uint32_t len)
+{
+    (void)len;
+    if (!g_dm_active) return true;
+
+    for (uint8_t i = 0; i < g_num_triggers; i++) {
+        if (g_triggers[i].used && g_triggers[i].type == 2 &&
+            g_triggers[i].addr == addr && g_triggers[i].watch == (uint8_t)type) {
+            riscv_write_csr(CSR_TSELECT, i);
+            riscv_write_csr(CSR_TDATA1, 0);
+            g_triggers[i].used = false;
+            return true;
+        }
+    }
+    return true;  // Safe to remove non-existent
+}
+
+bool riscv_watchpoint_hit(target_watch_t *out_type, uint32_t *out_addr)
+{
+    if (!g_dm_active) return false;
+
+    for (uint8_t i = 0; i < g_num_triggers; i++) {
+        if (g_triggers[i].used && g_triggers[i].type == 2) {
+            if (!riscv_write_csr(CSR_TSELECT, i)) continue;
+
+            uint32_t tdata1;
+            if (riscv_read_csr(CSR_TDATA1, &tdata1) && (tdata1 & MCONTROL_HIT)) {
+                if (out_type) *out_type = (target_watch_t)g_triggers[i].watch;
+                if (out_addr) *out_addr = g_triggers[i].addr;
+                // Clear hit bit by writing back without it
+                riscv_write_csr(CSR_TDATA1, tdata1 & ~MCONTROL_HIT);
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 #endif // PROBE_ENABLE_RISCV

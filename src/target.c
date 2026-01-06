@@ -225,9 +225,7 @@ bool target_breakpoint_insert(uint32_t addr)
 #endif
 #if HAVE_RISCV
         case TARGET_ARCH_RISCV:
-            // TODO: Implement RISC-V trigger module for breakpoints
-            (void)addr;
-            return false;
+            return riscv_breakpoint_insert(addr);
 #endif
         default:
             (void)addr;
@@ -244,8 +242,7 @@ bool target_breakpoint_remove(uint32_t addr)
 #endif
 #if HAVE_RISCV
         case TARGET_ARCH_RISCV:
-            (void)addr;
-            return false;
+            return riscv_breakpoint_remove(addr);
 #endif
         default:
             (void)addr;
@@ -262,8 +259,7 @@ bool target_watchpoints_supported(void)
 #endif
 #if HAVE_RISCV
         case TARGET_ARCH_RISCV:
-            // TODO: Check trigger module capabilities
-            return false;
+            return riscv_watchpoints_supported();
 #endif
         default:
             return false;
@@ -279,8 +275,7 @@ bool target_watchpoint_insert(target_watch_t type, uint32_t addr, uint32_t len)
 #endif
 #if HAVE_RISCV
         case TARGET_ARCH_RISCV:
-            (void)type; (void)addr; (void)len;
-            return false;
+            return riscv_watchpoint_insert(type, addr, len);
 #endif
         default:
             (void)type; (void)addr; (void)len;
@@ -297,8 +292,7 @@ bool target_watchpoint_remove(target_watch_t type, uint32_t addr, uint32_t len)
 #endif
 #if HAVE_RISCV
         case TARGET_ARCH_RISCV:
-            (void)type; (void)addr; (void)len;
-            return false;
+            return riscv_watchpoint_remove(type, addr, len);
 #endif
         default:
             (void)type; (void)addr; (void)len;
@@ -323,8 +317,7 @@ bool target_watchpoint_hit(target_watch_t *out_type, uint32_t *out_addr)
 #endif
 #if HAVE_RISCV
         case TARGET_ARCH_RISCV:
-            (void)out_type; (void)out_addr;
-            return false;
+            return riscv_watchpoint_hit(out_type, out_addr);
 #endif
         default:
             (void)out_type; (void)out_addr;
