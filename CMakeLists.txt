@@ -7,7 +7,14 @@ set(MSPM0_SDK_PATH "/Applications/ti/mspm0_sdk_2_08_00_03/" CACHE PATH "Path to 
 set(PROBE_DEVICE "MSPM0C1104" CACHE STRING "Probe MCU (MSPM0C1104 or MSPM0C1105)")
 set(PROBE_UART_BAUD "115200" CACHE STRING "UART baud rate for GDB RSP")
 set(PROBE_SWD_DELAY_US "0" CACHE STRING "Microseconds delay per SWD clock cycle (0=max speed, increase for slow targets/long wires)")
-option(PROBE_TINY_RAM "Minimize static RAM usage (smaller RSP buffers)" ON)
+
+# Auto-select TINY_RAM based on device (C1104 has only 1KB SRAM)
+if(PROBE_DEVICE STREQUAL "MSPM0C1104")
+    set(_tiny_ram_default ON)
+else()
+    set(_tiny_ram_default OFF)
+endif()
+option(PROBE_TINY_RAM "Minimize static RAM usage (smaller RSP buffers, auto-selected per device)" ${_tiny_ram_default})
 option(PROBE_ENABLE_SYSOSC_FCL "Enable SYSOSC Frequency Correction Loop (FCL) at boot (may require ROSC resistor; locks until BOOTRST)" OFF)
 
 # HFXT crystal support (C1105/C1106 only - C1104 has no HFXT hardware)
@@ -185,9 +192,9 @@ endif()
 if(PROBE_TINY_RAM)
     target_compile_definitions(mspm0_debugger.elf PRIVATE
         PROBE_TINY_RAM=1
-        RSP_MAX_PAYLOAD=128
-        RSP_PACKET_SIZE_HEX=\"80\"
-        RSP_IOBUF_SIZE=64
+        RSP_MAX_PAYLOAD=256
+        RSP_PACKET_SIZE_HEX=\"100\"
+        RSP_IOBUF_SIZE=128
     )
 else()
     target_compile_definitions(mspm0_debugger.elf PRIVATE

@@ -34,15 +34,17 @@ Optional RISC-V debug support via JTAG (`-DPROBE_ENABLE_JTAG=ON -DPROBE_ENABLE_R
 
 ## Build Profiles
 
-Tiny build (C1104, `PROBE_TINY_RAM=ON`):
-- Smaller RSP buffers (`PacketSize=0x80`)
-- Target XML disabled by default (`PROBE_ENABLE_QXFER_TARGET_XML=OFF`)
-- DWT watchpoints disabled by default (`PROBE_ENABLE_DWT_WATCHPOINTS=OFF`)
+`PROBE_TINY_RAM` is auto-selected based on device:
 
-Full build (C1105, `PROBE_TINY_RAM=OFF`):
+C1104 (auto `PROBE_TINY_RAM=ON`):
+- Smaller RSP buffers (`PacketSize=0x100`)
+- Target XML disabled (`PROBE_ENABLE_QXFER_TARGET_XML=OFF`)
+- DWT watchpoints disabled (`PROBE_ENABLE_DWT_WATCHPOINTS=OFF`)
+
+C1105 (auto `PROBE_TINY_RAM=OFF`):
 - Larger RSP buffers (`PacketSize=0x200`)
-- Target XML enabled by default (arch string from CPUID)
-- DWT watchpoints enabled by default (`Z2/Z3/Z4`, when DWT is present)
+- Target XML enabled (arch string from CPUID)
+- DWT watchpoints enabled (`Z2/Z3/Z4`, when DWT is present)
 
 Please note that exact pinning is not yet finalized, as I have not done a schematic or a board build!
 
@@ -65,23 +67,30 @@ Optional Cortex-M features (in "full" builds):
 - RISC-V Debug Spec 0.13 via DMI (Debug Module Interface)
 - RV32 halt/run/step, GPR + PC access, memory read/write
 - System Bus Access (SBA) for efficient memory operations
+- Hardware breakpoints and watchpoints via Trigger Module (Sdtrig)
 - Runtime auto-detection when built alongside Cortex-M
 
 ## Reported Build Sizes (approx)
 
-Latest local builds (C1105, `PROBE_TINY_RAM=OFF`):
+### MSPM0C1104 (16 KB Flash / 1 KB SRAM) — `PROBE_TINY_RAM=ON`
+
+Smaller buffers (`PacketSize=0x100`), no target XML, no DWT watchpoints.
 
 | Configuration | Flash | SRAM |
 |---------------|-------|------|
-| Cortex-M only (default) | 13.5 KB (41%) | 1.4 KB (17%) |
-| RISC-V only | 8.7 KB (27%) | 1.2 KB (15%) |
-| Dual (Cortex-M + RISC-V) | 16.2 KB (49%) | 1.4 KB (17%) |
+| Cortex-M only | 8.0 KB (50%) | 920 B (90%) |
+| RISC-V only | 9.0 KB (56%) | 896 B (88%) |
+| Dual (CM + RV) | 11.4 KB (71%) | 968 B (95%) |
 
-Tiny build (C1104, `PROBE_TINY_RAM=ON`, Cortex-M only):
+### MSPM0C1105 (32 KB Flash / 8 KB SRAM) — `PROBE_TINY_RAM=OFF`
+
+Larger buffers (`PacketSize=0x200`), target XML, DWT watchpoints enabled.
 
 | Configuration | Flash | SRAM |
 |---------------|-------|------|
-| C1104 tiny | 8.2 KB (50%) | 728 B (71%) |
+| Cortex-M only | 13.2 KB (41%) | 1.3 KB (17%) |
+| RISC-V only | 9.5 KB (30%) | 1.3 KB (16%) |
+| Dual (CM + RV) | 16.7 KB (52%) | 1.4 KB (17%) |
 
 ## Requirements
 
@@ -95,19 +104,19 @@ You can override the SDK location with:
 
 ## Configure + Build
 
-Tiny C1104 build (recommended for 1KB SRAM validation):
+C1104 build (Cortex-M only, auto-selects smaller buffers):
 ```
-cmake -S . -B build_c1104 -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-gcc.cmake -DPROBE_DEVICE=MSPM0C1104 -DPROBE_TINY_RAM=ON
+cmake -S . -B build_c1104 -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-gcc.cmake -DPROBE_DEVICE=MSPM0C1104
 cmake --build build_c1104 -j
 ```
 
-Full C1105 build (defaults to XML + watchpoints):
+C1105 build (Cortex-M only, auto-selects full features):
 ```
-cmake -S . -B build_c1105 -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-gcc.cmake -DPROBE_DEVICE=MSPM0C1105 -DPROBE_TINY_RAM=OFF
+cmake -S . -B build_c1105 -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-gcc.cmake -DPROBE_DEVICE=MSPM0C1105
 cmake --build build_c1105 -j
 ```
 
-RISC-V only build (ultra-minimal, no Cortex-M):
+RISC-V only build:
 ```
 cmake -S . -B build_rv -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-gcc.cmake -DPROBE_DEVICE=MSPM0C1105 -DPROBE_ENABLE_CORTEXM=OFF -DPROBE_ENABLE_JTAG=ON -DPROBE_ENABLE_RISCV=ON
 cmake --build build_rv -j

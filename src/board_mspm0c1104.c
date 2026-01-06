@@ -208,3 +208,48 @@ void nreset_write(int level)
         DL_GPIO_clearPins(PROBE_SWD_PORT, PROBE_NRESET_PIN);
     }
 }
+
+// ---------------- JTAG HAL (optional) ----------------
+#if defined(PROBE_ENABLE_JTAG) && (PROBE_ENABLE_JTAG)
+
+// JTAG pins (adjust when schematic is set)
+// For now, reuse SWCLK as TCK and add separate TMS/TDI/TDO pins.
+#define PROBE_JTAG_PORT            GPIOA
+#define PROBE_JTAG_TCK_PIN         DL_GPIO_PIN_0   // same as SWCLK
+#define PROBE_JTAG_TMS_PIN         DL_GPIO_PIN_1   // same as SWDIO
+#define PROBE_JTAG_TDI_PIN         DL_GPIO_PIN_3   // new pin
+#define PROBE_JTAG_TDO_PIN         DL_GPIO_PIN_4   // new pin
+
+void jtag_tck_write(int level)
+{
+    if (level) {
+        DL_GPIO_setPins(PROBE_JTAG_PORT, PROBE_JTAG_TCK_PIN);
+    } else {
+        DL_GPIO_clearPins(PROBE_JTAG_PORT, PROBE_JTAG_TCK_PIN);
+    }
+}
+
+void jtag_tms_write(int level)
+{
+    if (level) {
+        DL_GPIO_setPins(PROBE_JTAG_PORT, PROBE_JTAG_TMS_PIN);
+    } else {
+        DL_GPIO_clearPins(PROBE_JTAG_PORT, PROBE_JTAG_TMS_PIN);
+    }
+}
+
+void jtag_tdi_write(int level)
+{
+    if (level) {
+        DL_GPIO_setPins(PROBE_JTAG_PORT, PROBE_JTAG_TDI_PIN);
+    } else {
+        DL_GPIO_clearPins(PROBE_JTAG_PORT, PROBE_JTAG_TDI_PIN);
+    }
+}
+
+int jtag_tdo_read(void)
+{
+    return (DL_GPIO_readPins(PROBE_JTAG_PORT, PROBE_JTAG_TDO_PIN) ? 1 : 0);
+}
+
+#endif // PROBE_ENABLE_JTAG
