@@ -9,12 +9,17 @@ The goal here is to implement a debugger probe on an ultra-low cost part, target
 
 ## Probe MCU Targets
 
-Some of the smallest parts are selected, which sets us RAM and Flash budgets:
+Multiple MSPM0 variants supported with different cost/feature trade-offs:
 
-- [MSPM0C1104](https://www.ti.com/product/MSPM0C1104) ("tiny"): 16KB flash / 1KB SRAM / 24 MHz SYSOSC / $0.195@1ku
-- [MSPM0C1105](https://www.ti.com/product/MSPM0C1105) ("full"): 32KB flash / 8KB SRAM / 32 MHz SYSOSC / $0.376@1ku
+- [MSPM0C1104](https://www.ti.com/product/MSPM0C1104) ("tiny"): 16KB flash / 1KB SRAM / 24 MHz / $0.195@1ku — UART only
+- [MSPM0C1105](https://www.ti.com/product/MSPM0C1105) ("full"): 32KB flash / 8KB SRAM / 32 MHz / $0.376@1ku — UART only
+- [MSPM0G5187](https://www.ti.com/product/MSPM0G5187) ("usb"): 128KB flash / 32KB SRAM / 80 MHz / ~$1@1ku — Native USB-CDC
 
-Pinning is not yet finalized. 16-pin parts may be viable, TODO.
+The G5187 variant includes native USB 2.0 Full Speed support with dual CDC ports:
+- **CDC Port 0**: GDB RSP communication (replaces UART on C1104/C1105)
+- **CDC Port 1**: Target VCOM bridge (connects to target's serial output, like J-Link VCOM)
+
+Pinning is not yet finalized. 16-pin parts may be viable for C110x, TODO.
 
 ## Supported Debug Targets
 
@@ -92,6 +97,16 @@ Larger buffers (`PacketSize=0x200`), target XML, DWT watchpoints enabled.
 | RISC-V only | 9.5 KB (30%) | 1.3 KB (16%) |
 | Dual (CM + RV) | 16.7 KB (52%) | 1.4 KB (17%) |
 
+### MSPM0G5187 (128 KB Flash / 32 KB SRAM) — USB-CDC
+
+Native USB-CDC with dual ports (GDB RSP + target VCOM bridge). TinyUSB stack included.
+
+| Configuration | Flash | SRAM |
+|---------------|-------|------|
+| Cortex-M only + USB | 20.6 KB (16%) | 3.3 KB (10%) |
+| RISC-V only + USB | 17.0 KB (13%) | 3.2 KB (10%) |
+| Dual (CM + RV) + USB | 24.2 KB (19%) | 3.3 KB (10%) |
+
 ## Requirements
 
 - CMake 3.20+
@@ -128,6 +143,12 @@ cmake -S . -B build_dual -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-gcc.cmake -
 cmake --build build_dual -j
 ```
 
+G5187 USB build (native USB-CDC, no external UART bridge needed):
+```
+cmake -S . -B build_g5187 -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-gcc.cmake -DPROBE_DEVICE=MSPM0G5187
+cmake --build build_g5187 -j
+```
+
 ### Architecture Options
 
 - `-DPROBE_ENABLE_CORTEXM=ON` (default) - Enable Cortex-M debug via SWD
@@ -142,19 +163,29 @@ At least one of `PROBE_ENABLE_CORTEXM` or `PROBE_ENABLE_RISCV` must be enabled.
 - `-DPROBE_ENABLE_DWT_WATCHPOINTS=OFF` - Disable DWT watchpoints
 - `-DPROBE_SWD_DELAY_US=0` - SWD clock delay (increase for slow targets)
 - `-DPROBE_USE_HFXT=ON` - Use external crystal (C1105 only)
+- `-DPROBE_ENABLE_VCOM=OFF` - Disable target VCOM bridge (G5187 only)
 
 ## Usage (GDB)
 
-Connect the probe UART to your host and point GDB at the serial port:
-```
-(gdb) target remote /dev/tty.usbserial-XXXX
-```
+### C1104/C1105 (UART)
 
-If you need to set the baud rate explicitly:
+Connect the probe UART to your host via USB-UART bridge and point GDB at the serial port:
 ```
 (gdb) set serial baud 115200
 (gdb) target remote /dev/tty.usbserial-XXXX
 ```
+
+### G5187 (USB-CDC)
+
+Connect the probe directly via USB. Two CDC ports will enumerate:
+- First port: GDB RSP (use this for debugging)
+- Second port: Target VCOM (optional serial monitor)
+
+```
+(gdb) target remote /dev/tty.usbmodemXXXX
+```
+
+The VCOM port can be opened with any serial terminal to monitor target serial output.
 
 ## Flashing the Probe (FYI)
 

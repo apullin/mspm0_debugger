@@ -67,8 +67,16 @@ elseif(PROBE_DEVICE STREQUAL "MSPM0C1105")
     set(PROBE_LINKER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/linker/mspm0c1105.lds")
     set(PROBE_DRIVERLIB_A "${MSPM0_SDK_PATH}/source/ti/driverlib/lib/gcc/m0p/mspm0c1105_c1106/driverlib.a")
     set(PROBE_CORE_CLK_HZ_DEFAULT "32000000")
+elseif(PROBE_DEVICE STREQUAL "MSPM0G5187")
+    set(PROBE_DEVICE_DEFINE "__MSPM0G5187__")
+    set(PROBE_BOARD_SRC "src/board_mspm0g5187.c")
+    set(PROBE_STARTUP_SRC "startup/startup_mspm0g518x_gcc.c")
+    set(PROBE_LINKER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/linker/mspm0g5187.lds")
+    set(PROBE_DRIVERLIB_A "${MSPM0_SDK_PATH}/source/ti/driverlib/lib/gcc/m0p/mspm0g518x/driverlib.a")
+    set(PROBE_CORE_CLK_HZ_DEFAULT "80000000")
+    set(PROBE_HAS_USB ON)
 else()
-    message(FATAL_ERROR "Unknown PROBE_DEVICE='${PROBE_DEVICE}'. Use MSPM0C1104 or MSPM0C1105.")
+    message(FATAL_ERROR "Unknown PROBE_DEVICE='${PROBE_DEVICE}'. Use MSPM0C1104, MSPM0C1105, or MSPM0G5187.")
 endif()
 
 if(NOT DEFINED PROBE_CORE_CLK_HZ)
@@ -79,6 +87,8 @@ elseif(DEFINED PROBE_DEVICE_LAST AND NOT PROBE_DEVICE_LAST STREQUAL PROBE_DEVICE
         set(_probe_old_default "24000000")
     elseif(PROBE_DEVICE_LAST STREQUAL "MSPM0C1105")
         set(_probe_old_default "32000000")
+    elseif(PROBE_DEVICE_LAST STREQUAL "MSPM0G5187")
+        set(_probe_old_default "80000000")
     endif()
 
     if(_probe_old_default AND PROBE_CORE_CLK_HZ STREQUAL _probe_old_default)
@@ -203,6 +213,44 @@ else()
         RSP_PACKET_SIZE_HEX=\"${RSP_PACKET_SIZE_HEX}\"
         RSP_IOBUF_SIZE=${RSP_IOBUF_SIZE}
     )
+endif()
+
+# USB/TinyUSB support (MSPM0G5187 only)
+if(PROBE_HAS_USB)
+    option(PROBE_ENABLE_VCOM "Enable VCOM port for target UART bridge (USB-CDC port 1)" ON)
+
+    set(TINYUSB_PATH "${MSPM0_SDK_PATH}/source/third_party/tinyusb")
+
+    target_sources(mspm0_debugger.elf PRIVATE
+        # Local USB config
+        src/usb/usb_descriptors.c
+        # TinyUSB core
+        ${TINYUSB_PATH}/src/tusb.c
+        ${TINYUSB_PATH}/src/common/tusb_fifo.c
+        # TinyUSB device stack
+        ${TINYUSB_PATH}/src/device/usbd.c
+        ${TINYUSB_PATH}/src/device/usbd_control.c
+        # TinyUSB CDC class
+        ${TINYUSB_PATH}/src/class/cdc/cdc_device.c
+        # TinyUSB MSPM0 portable driver (mentor musb)
+        ${TINYUSB_PATH}/src/portable/mentor/musb/dcd_musb.c
+    )
+
+    target_include_directories(mspm0_debugger.elf PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/usb
+        ${TINYUSB_PATH}/src
+        ${TINYUSB_PATH}/hw/mcu/ti/mspm0
+        ${TINYUSB_PATH}/hw/mcu/ti/mspm0/ti/devices/msp
+    )
+
+    target_compile_definitions(mspm0_debugger.elf PRIVATE
+        PROBE_HAS_USB=1
+        CFG_TUSB_MCU=OPT_MCU_MSPM0G518X
+    )
+
+    if(PROBE_ENABLE_VCOM)
+        target_compile_definitions(mspm0_debugger.elf PRIVATE PROBE_ENABLE_VCOM=1)
+    endif()
 endif()
 
 target_compile_options(mspm0_debugger.elf PRIVATE

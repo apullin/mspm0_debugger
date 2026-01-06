@@ -48,9 +48,21 @@ bool probe_init(void)
 
 void probe_poll(void)
 {
+#if defined(PROBE_HAS_USB) && PROBE_HAS_USB
+    // Service USB stack (must be called frequently)
+    extern void usb_poll(void);
+    usb_poll();
+#endif
+
     int ch;
     while ((ch = uart_getc()) >= 0) {
         rsp_process_byte((uint8_t) ch);
     }
     rsp_poll();
+
+#if defined(PROBE_ENABLE_VCOM) && PROBE_ENABLE_VCOM
+    // Service VCOM bridge (USB CDC port 1 <-> target UART)
+    extern void vcom_poll(void);
+    vcom_poll();
+#endif
 }
