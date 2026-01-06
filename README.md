@@ -97,7 +97,7 @@ Larger buffers (`PacketSize=0x200`), target XML, DWT watchpoints enabled.
 - CMake 3.20+
 - Arm GNU Toolchain (`arm-none-eabi-gcc`, `arm-none-eabi-size`, `arm-none-eabi-objcopy`)
 - TI MSPM0 SDK installed locally (default path):
-  - `/Applications/ti/mspm0_sdk_2_08_00_03/`
+  - `/Applications/ti/mspm0_sdk_2_09_00_01/`
 
 You can override the SDK location with:
 - `-DMSPM0_SDK_PATH=/path/to/mspm0_sdk`

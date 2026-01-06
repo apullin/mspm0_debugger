@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 
 project(mspm0_debugger C)
 
-set(MSPM0_SDK_PATH "/Applications/ti/mspm0_sdk_2_08_00_03/" CACHE PATH "Path to TI MSPM0 SDK")
+set(MSPM0_SDK_PATH "/Applications/ti/mspm0_sdk_2_09_00_01/" CACHE PATH "Path to TI MSPM0 SDK")
 
 set(PROBE_DEVICE "MSPM0C1104" CACHE STRING "Probe MCU (MSPM0C1104 or MSPM0C1105)")
 set(PROBE_UART_BAUD "115200" CACHE STRING "UART baud rate for GDB RSP")
