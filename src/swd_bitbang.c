@@ -53,6 +53,50 @@ static void swd_line_reset(void)
     }
 }
 
+static void swd_write_bits(uint32_t val, int nbits)
+{
+    swdio_dir_out();
+    for (int i = 0; i < nbits; i++) {
+        swd_write_bit((val >> i) & 1u);
+    }
+}
+
+static void swd_idle_cycles(int n)
+{
+    swdio_dir_out();
+    swdio_write(0);
+    for (int i = 0; i < n; i++) {
+        swd_clk_cycle();
+    }
+}
+
+void swd_leave_dormant(void)
+{
+    // ADIv6 dormant-to-SWD wake sequence (ARM Debug Interface v6.0 B2.3.4)
+    // Safe to send to ADIv5 targets - they ignore it.
+
+    // 1. At least 8 cycles with SWDIO high
+    swdio_dir_out();
+    swdio_write(1);
+    for (int i = 0; i < 8; i++) {
+        swd_clk_cycle();
+    }
+
+    // 2. 128-bit selection alert sequence (LSB-first)
+    //    Alert value: 0x19BC0EA2E3DDAFE986852D956209F392
+    //    Transmitted as 32-bit words, LSB of each word first
+    swd_write_bits(0x6209F392, 32);
+    swd_write_bits(0x86852D95, 32);
+    swd_write_bits(0xE3DDAFE9, 32);
+    swd_write_bits(0x19BC0EA2, 32);
+
+    // 3. Four idle cycles (SWDIO low)
+    swd_idle_cycles(4);
+
+    // 4. SWD activation code: 0x1A (8 bits, LSB-first)
+    swd_write_bits(0x1A, 8);
+}
+
 void swd_jtag_to_swd(void)
 {
     // Standard JTAG->SWD 16-bit sequence: 0xE79E (LSB-first transmit)

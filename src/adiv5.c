@@ -1,4 +1,4 @@
-// ADIv5 DP/AP access over SWD
+// ADIv5/ADIv6 DP/AP access over SWD
 
 #include "adiv5.h"
 
@@ -75,6 +75,8 @@ bool adiv5_init(void)
 {
     g_dp_select = 0xFFFFFFFFu;
 
+    // ADIv6 dormant wake sequence (harmless on ADIv5 targets)
+    swd_leave_dormant();
     swd_jtag_to_swd();
 
     // Try read IDCODE to confirm link
