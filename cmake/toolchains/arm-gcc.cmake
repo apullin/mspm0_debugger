@@ -6,7 +6,6 @@ set(CMAKE_SYSTEM_NAME Generic)
 
 # Find GCC for ARM.
 find_compiler(COMPILER_CC arm-none-eabi-gcc)
-find_compiler(COMPILER_CXX arm-none-eabi-g++)
 # Use gcc for compiling/assembling ASM
 set(COMPILER_ASM "${COMPILER_CC}" CACHE INTERNAL "")
 
@@ -19,12 +18,14 @@ find_compiler(COMPILER_NM arm-none-eabi-nm)
 
 # Specify the cross compiler.
 set(CMAKE_C_COMPILER ${COMPILER_CC} CACHE FILEPATH "C compiler")
-set(CMAKE_CXX_COMPILER ${COMPILER_CXX} CACHE FILEPATH "C++ compiler")
 set(CMAKE_ASM_COMPILER ${COMPILER_ASM} CACHE FILEPATH "ASM compiler")
+set(CMAKE_OBJCOPY ${COMPILER_OBJCOPY} CACHE FILEPATH "Object-copy utility")
+set(CMAKE_SIZE ${COMPILER_SIZE} CACHE FILEPATH "Object-size utility")
+set(CMAKE_AR ${COMPILER_AR} CACHE FILEPATH "Archiver")
+set(CMAKE_NM ${COMPILER_NM} CACHE FILEPATH "Symbol utility")
 
 # Disable compiler checks.
 set(CMAKE_C_COMPILER_FORCED TRUE)
-set(CMAKE_CXX_COMPILER_FORCED TRUE)
 
 # Add target system root to cmake find path.
 get_filename_component(COMPILER_DIR "${COMPILER_CC}" DIRECTORY)

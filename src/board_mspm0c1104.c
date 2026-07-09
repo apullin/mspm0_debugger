@@ -1,5 +1,6 @@
 #include "board.h"
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include <ti/devices/msp/msp.h>
@@ -7,6 +8,7 @@
 #include <ti/driverlib/m0p/dl_core.h>
 
 #include "hal.h"
+#include "intmath.h"
 
 #ifndef PROBE_CORE_CLK_HZ
 // MSPM0C110x SYSOSC is a 24MHz internal oscillator (per device datasheet/DFP metadata).
@@ -32,6 +34,15 @@
 #define PROBE_SWCLK_IOMUX          (IOMUX_PINCM1)
 #define PROBE_SWDIO_IOMUX          (IOMUX_PINCM2)
 #define PROBE_NRESET_IOMUX         (IOMUX_PINCM3)
+
+#if defined(PROBE_ENABLE_JTAG) && (PROBE_ENABLE_JTAG)
+// JTAG data pins. Note: C110x has no PA3, so TDI uses PA4 (PINCM5) and TDO
+// uses PA6 (PINCM7) - see IOMUX_PINCMn_PF_GPIOA_DIOxx in mspm0c110x.h.
+#define PROBE_JTAG_TDI_PIN_DEF     DL_GPIO_PIN_4
+#define PROBE_JTAG_TDO_PIN_DEF     DL_GPIO_PIN_6
+#define PROBE_JTAG_TDI_IOMUX       (IOMUX_PINCM5)
+#define PROBE_JTAG_TDO_IOMUX       (IOMUX_PINCM7)
+#endif
 
 static void systick_init_free_running(void)
 {
@@ -68,12 +79,14 @@ void board_init(void)
     // SWD pins
     // SWCLK: standard push-pull output
     DL_GPIO_initDigitalOutput(PROBE_SWCLK_IOMUX);
-    // SWDIO: open-drain (Hi-Z) with internal pull-up for bidirectional SWD
+    // SWDIO: push-pull while driving (output enabled), Hi-Z with pull-up
+    // while listening (output disabled via swdio_dir_in). Open-drain would
+    // make every high bit an RC rise against the pull-up - too slow for SWD.
     DL_GPIO_initDigitalOutputFeatures(PROBE_SWDIO_IOMUX,
         DL_GPIO_INVERSION_DISABLE,
         DL_GPIO_RESISTOR_PULL_UP,
         DL_GPIO_DRIVE_STRENGTH_LOW,
-        DL_GPIO_HIZ_ENABLE);
+        DL_GPIO_HIZ_DISABLE);
     // NRESET: open-drain with pull-up (active low reset)
     DL_GPIO_initDigitalOutputFeatures(PROBE_NRESET_IOMUX,
         DL_GPIO_INVERSION_DISABLE,
@@ -111,6 +124,16 @@ void board_init(void)
     DL_UART_Main_setTXFIFOThreshold(PROBE_UART_INST, DL_UART_TX_FIFO_LEVEL_EMPTY);
     DL_UART_Main_enable(PROBE_UART_INST);
 
+#if defined(PROBE_ENABLE_JTAG) && (PROBE_ENABLE_JTAG)
+    // JTAG data pins (TCK/TMS reuse the SWD pins configured above).
+    // TDI: push-pull output; TDO: input. Without IOMUX configuration these
+    // pins are disconnected and every TDO read returns 0.
+    DL_GPIO_initDigitalOutput(PROBE_JTAG_TDI_IOMUX);
+    DL_GPIO_initDigitalInput(PROBE_JTAG_TDO_IOMUX);
+    DL_GPIO_enableOutput(GPIOA, PROBE_JTAG_TDI_PIN_DEF);
+    DL_GPIO_clearPins(GPIOA, PROBE_JTAG_TDI_PIN_DEF);
+#endif
+
     systick_init_free_running();
 }
 
@@ -118,11 +141,14 @@ void board_init(void)
 
 void delay_us(uint32_t us)
 {
-    // SysTick is 24-bit, decrementing at core clock.
-    uint64_t ticks_total = ((uint64_t) PROBE_CORE_CLK_HZ * (uint64_t) us) / 1000000ull;
+    uint64_t ticks_total = probe_u64_div_u32(
+        (uint64_t) PROBE_CORE_CLK_HZ * (uint64_t) us, 1000000u, NULL);
 
+    // Chunk at half the counter range: a full-range chunk leaves only a
+    // one-tick exit window that the polling loop can straddle forever.
     while (ticks_total) {
-        uint32_t chunk = (ticks_total > 0x00FFFFFFu) ? 0x00FFFFFFu : (uint32_t) ticks_total;
+        uint32_t chunk =
+            (ticks_total > 0x00800000u) ? 0x00800000u : (uint32_t) ticks_total;
         uint32_t start = SysTick->VAL & 0x00FFFFFFu;
         while (((start - (SysTick->VAL & 0x00FFFFFFu)) & 0x00FFFFFFu) < chunk) {
         }
@@ -136,20 +162,28 @@ uint32_t hal_time_us(void)
     // Must be called at least once per ~700ms to avoid missing wrap-around.
     static uint32_t last_val   = 0;
     static uint32_t us_counter = 0;
-    const uint32_t  ticks_per_us = PROBE_CORE_CLK_HZ / 1000000u;
-
     uint32_t cur = SysTick->VAL & 0x00FFFFFFu;
-    uint32_t elapsed_ticks;
+    // Down-counter: modular subtraction covers the wrap case too.
+    uint32_t elapsed_ticks = (last_val - cur) & 0x00FFFFFFu;
 
-    if (cur <= last_val) {
-        elapsed_ticks = last_val - cur;
-    } else {
-        // SysTick wrapped (counts down from 0x00FFFFFF to 0)
-        elapsed_ticks = last_val + (0x01000000u - cur);
-    }
-
-    us_counter += elapsed_ticks / ticks_per_us;
+#if (PROBE_CORE_CLK_HZ % 1000000u) == 0
+    const uint32_t ticks_per_us = PROBE_CORE_CLK_HZ / 1000000u;
+    // Consume only whole microseconds and leave the remainder ticks in
+    // place, so rapid calls (< 1us apart) don't silently discard time.
+    uint32_t whole_us = elapsed_ticks / ticks_per_us;
+    us_counter += whole_us;
+    last_val = (last_val - whole_us * ticks_per_us) & 0x00FFFFFFu;
+#else
+    // At fractional-MHz clocks, consume all elapsed ticks and carry the
+    // sub-microsecond numerator remainder across calls.
+    static uint32_t time_remainder = 0u;
+    uint64_t scaled_ticks =
+        (uint64_t) elapsed_ticks * 1000000u + (uint64_t) time_remainder;
+    uint64_t whole_us = probe_u64_div_u32(
+        scaled_ticks, PROBE_CORE_CLK_HZ, &time_remainder);
+    us_counter += (uint32_t) whole_us;
     last_val = cur;
+#endif
 
     return us_counter;
 }
@@ -213,12 +247,13 @@ void nreset_write(int level)
 #if defined(PROBE_ENABLE_JTAG) && (PROBE_ENABLE_JTAG)
 
 // JTAG pins (adjust when schematic is set)
-// For now, reuse SWCLK as TCK and add separate TMS/TDI/TDO pins.
+// For now, reuse SWCLK as TCK and SWDIO as TMS; TDI/TDO defined at the top
+// of this file (and IOMUX-configured in board_init).
 #define PROBE_JTAG_PORT            GPIOA
 #define PROBE_JTAG_TCK_PIN         DL_GPIO_PIN_0   // same as SWCLK
 #define PROBE_JTAG_TMS_PIN         DL_GPIO_PIN_1   // same as SWDIO
-#define PROBE_JTAG_TDI_PIN         DL_GPIO_PIN_3   // new pin
-#define PROBE_JTAG_TDO_PIN         DL_GPIO_PIN_4   // new pin
+#define PROBE_JTAG_TDI_PIN         PROBE_JTAG_TDI_PIN_DEF
+#define PROBE_JTAG_TDO_PIN         PROBE_JTAG_TDO_PIN_DEF
 
 void jtag_tck_write(int level)
 {

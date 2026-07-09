@@ -1,14 +1,19 @@
-// USB descriptors for MSPM0G5187 debugger probe
-// Dual CDC: Port 0 = GDB RSP, Port 1 = Target VCOM
+// USB descriptors for MSPM0G5187 debugger probe. Port 0 is always the GDB RSP
+// transport; optional Port 1 is the target VCOM bridge.
 
 #include "tusb.h"
 #include <string.h>
+
+#include <ti/driverlib/m0p/dl_factoryregion.h>
 
 // Use TI's test VID with a unique PID for this debugger probe
 // For production, obtain a proper VID/PID allocation
 #define USB_VID   0x2047  // TI USB VID
 #define USB_PID   0x0EDB  // Custom PID for MSPM0 Debugger
 #define USB_BCD   0x0200  // USB 2.0
+#ifndef PROBE_USB_BCD_DEVICE
+#define PROBE_USB_BCD_DEVICE 0x0020u // Firmware 0.2.0 fallback
+#endif
 
 //--------------------------------------------------------------------+
 // Device Descriptors
@@ -27,7 +32,7 @@ tusb_desc_device_t const desc_device = {
 
     .idVendor           = USB_VID,
     .idProduct          = USB_PID,
-    .bcdDevice          = 0x0100,
+    .bcdDevice          = PROBE_USB_BCD_DEVICE,
 
     .iManufacturer      = 0x01,
     .iProduct           = 0x02,
@@ -48,20 +53,24 @@ uint8_t const *tud_descriptor_device_cb(void)
 enum {
     ITF_NUM_CDC_0 = 0,       // GDB RSP port
     ITF_NUM_CDC_0_DATA,
+#if defined(PROBE_ENABLE_VCOM) && PROBE_ENABLE_VCOM
     ITF_NUM_CDC_1,           // Target VCOM port
     ITF_NUM_CDC_1_DATA,
+#endif
     ITF_NUM_TOTAL
 };
 
-#define CONFIG_TOTAL_LEN    (TUD_CONFIG_DESC_LEN + (2 * TUD_CDC_DESC_LEN))
+#define CONFIG_TOTAL_LEN    (TUD_CONFIG_DESC_LEN + (CFG_TUD_CDC * TUD_CDC_DESC_LEN))
 
 // Endpoint numbers (IN endpoints have 0x80 bit set)
 #define EPNUM_CDC_0_NOTIF   0x84
 #define EPNUM_CDC_0_IN      0x83
 #define EPNUM_CDC_0_OUT     0x02
+#if defined(PROBE_ENABLE_VCOM) && PROBE_ENABLE_VCOM
 #define EPNUM_CDC_1_NOTIF   0x82
 #define EPNUM_CDC_1_IN      0x81
 #define EPNUM_CDC_1_OUT     0x01
+#endif
 
 uint8_t const desc_fs_configuration[] = {
     // Config number, interface count, string index, total length, attribute, power in mA
@@ -71,8 +80,10 @@ uint8_t const desc_fs_configuration[] = {
     // Interface number, string index, EP notification address and size, EP data address (out, in) and size
     TUD_CDC_DESCRIPTOR(ITF_NUM_CDC_0, 4, EPNUM_CDC_0_NOTIF, 8, EPNUM_CDC_0_OUT, EPNUM_CDC_0_IN, 64),
 
+#if defined(PROBE_ENABLE_VCOM) && PROBE_ENABLE_VCOM
     // CDC 1: Target VCOM port
     TUD_CDC_DESCRIPTOR(ITF_NUM_CDC_1, 5, EPNUM_CDC_1_NOTIF, 8, EPNUM_CDC_1_OUT, EPNUM_CDC_1_IN, 64),
+#endif
 };
 
 // Invoked when received GET CONFIGURATION DESCRIPTOR
@@ -91,7 +102,9 @@ enum {
     STRID_PRODUCT,
     STRID_SERIAL,
     STRID_CDC_0,
+#if defined(PROBE_ENABLE_VCOM) && PROBE_ENABLE_VCOM
     STRID_CDC_1,
+#endif
 };
 
 char const *string_desc_arr[] = {
@@ -100,7 +113,9 @@ char const *string_desc_arr[] = {
     "GDB RSP Probe",             // 2: Product
     NULL,                        // 3: Serial (use chip unique ID)
     "GDB RSP",                   // 4: CDC 0 interface name
+#if defined(PROBE_ENABLE_VCOM) && PROBE_ENABLE_VCOM
     "Target VCOM",               // 5: CDC 1 interface name
+#endif
 };
 
 static uint16_t _desc_str[32 + 1];
@@ -118,15 +133,19 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
             break;
 
         case STRID_SERIAL: {
-            // Use chip unique ID as serial number (48 bits)
-            // Read from SYSCTL UNIQUEID registers
-            extern uint32_t SystemCoreClock;  // Placeholder - implement unique ID read
-            // For now, use a fixed serial. In production, read from device.
-            const char *serial = "MSPM0-0001";
-            chr_count = strlen(serial);
-            if (chr_count > 31) chr_count = 31;
-            for (size_t i = 0; i < chr_count; i++) {
-                _desc_str[1 + i] = serial[i];
+            static const char prefix[] = "MSPM0-";
+            static const char hex[] = "0123456789ABCDEF";
+            uint32_t trace_id = DL_FactoryRegion_getTraceID();
+
+            // TRACEID is programmed by TI during ATE and identifies the die;
+            // exposing it avoids collisions when multiple probes enumerate.
+            chr_count = sizeof(prefix) - 1u + 8u;
+            for (size_t i = 0; i < sizeof(prefix) - 1u; i++) {
+                _desc_str[1 + i] = (uint16_t)prefix[i];
+            }
+            for (size_t i = 0; i < 8u; i++) {
+                unsigned shift = (unsigned)(7u - i) * 4u;
+                _desc_str[sizeof(prefix) + i] = (uint16_t)hex[(trace_id >> shift) & 0xFu];
             }
             break;
         }

@@ -14,7 +14,9 @@
 #include "tusb.h"
 
 #ifndef PROBE_CORE_CLK_HZ
-#define PROBE_CORE_CLK_HZ 80000000u
+// The board currently runs MCLK from SYSOSC at 32 MHz (the 80 MHz SYSPLL
+// path is a TODO); keep this in sync with clock_init().
+#define PROBE_CORE_CLK_HZ 32000000u
 #endif
 
 // Power startup delay cycles
@@ -27,10 +29,21 @@
 #define PROBE_NRESET_PIN    DL_GPIO_PIN_2
 #define PROBE_SWCLK_IOMUX   (IOMUX_PINCM1)
 #define PROBE_SWDIO_IOMUX   (IOMUX_PINCM2)
-#define PROBE_NRESET_IOMUX  (IOMUX_PINCM3)
+// PINCM numbering is device-specific: PA2 is PINCM7 on G518x.
+#define PROBE_NRESET_IOMUX  (IOMUX_PINCM7)
+
+#if defined(PROBE_ENABLE_JTAG) && (PROBE_ENABLE_JTAG)
+// JTAG data pins: TDI = PA3 (PINCM8), TDO = PA4 (PINCM9); see
+// IOMUX_PINCMn_PF_GPIOA_DIOxx in mspm0g518x.h. PA3/PA4 double as the LFXT
+// pins, which this firmware does not use.
+#define PROBE_JTAG_TDI_PIN_DEF  DL_GPIO_PIN_3
+#define PROBE_JTAG_TDO_PIN_DEF  DL_GPIO_PIN_4
+#define PROBE_JTAG_TDI_IOMUX    (IOMUX_PINCM8)
+#define PROBE_JTAG_TDO_IOMUX    (IOMUX_PINCM9)
+#endif
 
 #if defined(PROBE_ENABLE_VCOM) && PROBE_ENABLE_VCOM
-// Target UART for VCOM bridge (UC0 on PA20/PA21)
+// Target UART for VCOM bridge (UC0 on PA10/PA11 = PINCM21/22)
 // MSPM0G518x uses UNICOMM interface, access via UC0->uart
 #define VCOM_UC_INST        UC0
 #define VCOM_UART_TX_IOMUX  (IOMUX_PINCM21)
@@ -54,7 +67,7 @@ static volatile uint32_t g_systick_ms = 0;
 
 void board_init(void)
 {
-    // Initialize clocks first (80 MHz)
+    // Initialize clocks first (32 MHz SYSOSC)
     clock_init();
 
     // Initialize GPIO for SWD/JTAG
@@ -79,7 +92,7 @@ static void clock_init(void)
 {
     // MSPM0G5187 default: SYSOSC 32 MHz
     // For USB, we need 48 MHz USB clock which comes from USBFLL (locks to USB SOF)
-    // CPU runs at 80 MHz from SYSPLL
+    // CPU runs at 32 MHz from SYSOSC; SYSPLL remains a future option.
 
     // Enable power to SYSCTL
     DL_SYSCTL_setPowerPolicyRUN0SLEEP0();
@@ -87,9 +100,15 @@ static void clock_init(void)
     // Configure SYSOSC to 32 MHz base frequency
     DL_SYSCTL_setSYSOSCFreq(DL_SYSCTL_SYSOSC_FREQ_BASE);
 
-    // For simplicity, we run at SYSOSC (32 MHz) initially
-    // USB will use its internal FLL locked to SOF for 48 MHz USB clock
+    // For simplicity, we run the CPU at SYSOSC (32 MHz).
     // TODO: Configure SYSPLL for 80 MHz if needed for faster SWD bitbang
+    // (also update PROBE_CORE_CLK_HZ, delay_us and systick_init).
+
+    // 48 MHz USB clock: enable the USBFLL (locked to USB SOF) and route it
+    // to the USB PHY. Without this the PHY has no clock and the device
+    // never enumerates. Same sequence as TI's G5187 TinyUSB example.
+    DL_SYSCTL_configUSBFLL(DL_SYSCTL_USBFLL_REFERENCE_SOF);
+    DL_SYSCTL_setUSBCLKSource(DL_SYSCTL_USBCLK_SOURCE_USBFLL);
 
     delay_cycles(POWER_STARTUP_DELAY);
 }
@@ -101,13 +120,15 @@ static void gpio_init(void)
     DL_GPIO_enablePower(GPIOA);
     delay_cycles(POWER_STARTUP_DELAY);
 
-    // SWD pins: SWCLK push-pull, SWDIO open-drain with pull-up, NRESET open-drain with pull-up
+    // SWD pins: SWCLK push-pull; SWDIO push-pull while driving, Hi-Z with
+    // pull-up while listening (open-drain would be too slow for SWD);
+    // NRESET open-drain with pull-up.
     DL_GPIO_initDigitalOutput(PROBE_SWCLK_IOMUX);
     DL_GPIO_initDigitalOutputFeatures(PROBE_SWDIO_IOMUX,
         DL_GPIO_INVERSION_DISABLE,
         DL_GPIO_RESISTOR_PULL_UP,
         DL_GPIO_DRIVE_STRENGTH_LOW,
-        DL_GPIO_HIZ_ENABLE);
+        DL_GPIO_HIZ_DISABLE);
     DL_GPIO_initDigitalOutputFeatures(PROBE_NRESET_IOMUX,
         DL_GPIO_INVERSION_DISABLE,
         DL_GPIO_RESISTOR_PULL_UP,
@@ -119,6 +140,16 @@ static void gpio_init(void)
     // Idle levels: SWCLK low, SWDIO/NRESET high (released)
     DL_GPIO_clearPins(PROBE_SWD_PORT, PROBE_SWCLK_PIN);
     DL_GPIO_setPins(PROBE_SWD_PORT, PROBE_SWDIO_PIN | PROBE_NRESET_PIN);
+
+#if defined(PROBE_ENABLE_JTAG) && (PROBE_ENABLE_JTAG)
+    // JTAG data pins (TCK/TMS reuse the SWD pins configured above).
+    // Without IOMUX configuration these pins are disconnected and every
+    // TDO read returns 0.
+    DL_GPIO_initDigitalOutput(PROBE_JTAG_TDI_IOMUX);
+    DL_GPIO_initDigitalInput(PROBE_JTAG_TDO_IOMUX);
+    DL_GPIO_enableOutput(GPIOA, PROBE_JTAG_TDI_PIN_DEF);
+    DL_GPIO_clearPins(GPIOA, PROBE_JTAG_TDI_PIN_DEF);
+#endif
 }
 
 static void usb_init(void)
@@ -152,10 +183,6 @@ static void usb_init(void)
 }
 
 #if defined(PROBE_ENABLE_VCOM) && PROBE_ENABLE_VCOM
-// IBRD/FBRD values for 115200 baud at 32 MHz clock
-#define UNICOMMUART_IBRD_32_MHZ_115200_BAUD    (21)
-#define UNICOMMUART_FBRD_32_MHZ_115200_BAUD    (45)
-
 static void vcom_uart_init(void)
 {
     // Reset UNICOMM instance
@@ -200,15 +227,9 @@ static void vcom_uart_init(void)
          UNICOMMUART_LCRH_SPS_MASK | UNICOMMUART_LCRH_WLEN_MASK |
          UNICOMMUART_LCRH_STP2_MASK));
 
-    // 16x oversampling
-    DL_Common_updateReg(&VCOM_UC_INST->uart->CTL0, UNICOMMUART_CTL0_HSE_OVS16,
-                        UNICOMMUART_CTL0_HSE_MASK);
-
-    // Baud rate divisors for 115200
-    DL_Common_updateReg(&VCOM_UC_INST->uart->IBRD, UNICOMMUART_IBRD_32_MHZ_115200_BAUD,
-                        UNICOMMUART_IBRD_DIVINT_MASK);
-    DL_Common_updateReg(&VCOM_UC_INST->uart->FBRD, UNICOMMUART_FBRD_32_MHZ_115200_BAUD,
-                        UNICOMMUART_FBRD_DIVFRAC_MASK);
+    // Derive oversampling and IBRD/FBRD from the actual BUSCLK. This avoids
+    // silently carrying divisors from a different clock configuration.
+    DL_UART_Main_configBaudRate(VCOM_UC_INST, PROBE_CORE_CLK_HZ, VCOM_UART_BAUD);
 
     // When configuring baud-rate divisor the LCRH must also be written
     DL_Common_updateReg(&VCOM_UC_INST->uart->LCRH,
@@ -222,8 +243,8 @@ static void vcom_uart_init(void)
 
 static void systick_init(void)
 {
-    // Configure SysTick for 1ms interrupts at 32 MHz (SYSOSC)
-    SysTick_Config(32000);
+    // Configure SysTick for 1ms interrupts
+    SysTick_Config(PROBE_CORE_CLK_HZ / 1000u);
 }
 
 // USB interrupt handler - forward to TinyUSB
@@ -244,8 +265,8 @@ void SysTick_Handler(void)
 
 void delay_us(uint32_t us)
 {
-    // Simple busy-wait delay at 32 MHz
-    uint32_t cycles = (32u * us);  // 32 cycles per us at 32 MHz
+    // Simple busy-wait delay
+    uint32_t cycles = (PROBE_CORE_CLK_HZ / 1000000u) * us;
     delay_cycles(cycles);
 }
 
@@ -266,7 +287,18 @@ int uart_getc(void)
 
 void uart_putc(uint8_t c)
 {
-    tud_cdc_n_write_char(0, c);
+    // Blocking write: while the 256-byte CDC TX FIFO is full, service the
+    // USB stack so in-flight transfers complete - otherwise replies longer
+    // than the FIFO are silently truncated mid-packet. Bounded so an
+    // unplugged/unopened host port cannot hang the probe.
+    uint32_t deadline = g_systick_ms + 250u;
+    while (tud_cdc_n_write_char(0, c) == 0) {
+        tud_cdc_n_write_flush(0);
+        tud_task();
+        if (!tud_cdc_n_connected(0) || (int32_t) (g_systick_ms - deadline) >= 0) {
+            return; // host gone or timeout: drop output
+        }
+    }
     tud_cdc_n_write_flush(0);
 }
 
@@ -280,21 +312,22 @@ void usb_poll(void)
 // VCOM bridge: USB-CDC Port 1 <-> Target UART
 void vcom_poll(void)
 {
-    // USB -> Target UART
-    while (tud_cdc_n_available(1)) {
+    // USB -> Target UART. Leave data in TinyUSB's RX FIFO while the hardware
+    // TX FIFO is full instead of blocking the whole USB service loop.
+    while (tud_cdc_n_available(1) &&
+           !(VCOM_UC_INST->uart->STAT & UNICOMMUART_STAT_TXFF_MASK)) {
         int c = tud_cdc_n_read_char(1);
         if (c >= 0) {
-            // Wait for TX FIFO not full, then transmit
-            while (VCOM_UC_INST->uart->STAT & UNICOMMUART_STAT_TXFF_MASK)
-                ;
             VCOM_UC_INST->uart->TXDATA = (uint8_t)c;
         }
     }
 
-    // Target UART -> USB
-    while (!(VCOM_UC_INST->uart->STAT & UNICOMMUART_STAT_RXFE_MASK)) {
+    // Target UART -> USB. Check capacity before consuming RXDATA so a full
+    // CDC FIFO applies backpressure rather than silently dropping the byte.
+    while (!(VCOM_UC_INST->uart->STAT & UNICOMMUART_STAT_RXFE_MASK) &&
+           tud_cdc_n_write_available(1)) {
         uint8_t c = (uint8_t)(VCOM_UC_INST->uart->RXDATA & UNICOMMUART_RXDATA_DATA_MASK);
-        tud_cdc_n_write_char(1, c);
+        (void)tud_cdc_n_write_char(1, (char)c);
     }
     tud_cdc_n_write_flush(1);
 }
@@ -351,8 +384,8 @@ void nreset_write(int level)
 #define PROBE_JTAG_PORT     GPIOA
 #define PROBE_JTAG_TCK_PIN  DL_GPIO_PIN_0   // same as SWCLK
 #define PROBE_JTAG_TMS_PIN  DL_GPIO_PIN_1   // same as SWDIO
-#define PROBE_JTAG_TDI_PIN  DL_GPIO_PIN_3
-#define PROBE_JTAG_TDO_PIN  DL_GPIO_PIN_4
+#define PROBE_JTAG_TDI_PIN  PROBE_JTAG_TDI_PIN_DEF
+#define PROBE_JTAG_TDO_PIN  PROBE_JTAG_TDO_PIN_DEF
 
 void jtag_tck_write(int level)
 {

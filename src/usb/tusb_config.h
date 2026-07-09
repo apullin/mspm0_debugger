@@ -1,5 +1,5 @@
-// TinyUSB configuration for MSPM0G5187 debugger probe
-// Dual CDC ports: Port 0 = GDB RSP, Port 1 = Target VCOM
+// TinyUSB configuration for MSPM0G5187 debugger probe. Port 0 is always the
+// GDB RSP transport; optional Port 1 is the target VCOM bridge.
 
 #ifndef TUSB_CONFIG_H
 #define TUSB_CONFIG_H
@@ -60,8 +60,12 @@ extern "C" {
 #endif
 
 //------------- CLASS -------------//
-// Dual CDC: Port 0 for GDB RSP, Port 1 for target VCOM
+// One CDC interface for RSP, plus one when the target VCOM bridge is enabled.
+#if defined(PROBE_ENABLE_VCOM) && PROBE_ENABLE_VCOM
 #define CFG_TUD_CDC               2
+#else
+#define CFG_TUD_CDC               1
+#endif
 #define CFG_TUD_HID               0
 #define CFG_TUD_AUDIO             0
 #define CFG_TUD_MSC               0

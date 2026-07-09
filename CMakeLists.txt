@@ -15,11 +15,31 @@ else()
     set(_tiny_ram_default OFF)
 endif()
 option(PROBE_TINY_RAM "Minimize static RAM usage (smaller RSP buffers, auto-selected per device)" ${_tiny_ram_default})
+
+# Re-evaluate the auto-select when PROBE_DEVICE changes in an existing build
+# dir (option() never updates a cached value): if the cached choice still
+# matches the OLD device's default, follow the new device's default.
+if(DEFINED PROBE_DEVICE_LAST AND NOT PROBE_DEVICE_LAST STREQUAL PROBE_DEVICE)
+    if(PROBE_DEVICE_LAST STREQUAL "MSPM0C1104")
+        set(_tiny_ram_old_default ON)
+    else()
+        set(_tiny_ram_old_default OFF)
+    endif()
+    if((PROBE_TINY_RAM AND _tiny_ram_old_default) OR (NOT PROBE_TINY_RAM AND NOT _tiny_ram_old_default))
+        set(PROBE_TINY_RAM ${_tiny_ram_default} CACHE BOOL
+            "Minimize static RAM usage (smaller RSP buffers, auto-selected per device)" FORCE)
+    else()
+        message(WARNING "PROBE_DEVICE changed from '${PROBE_DEVICE_LAST}' to '${PROBE_DEVICE}' but PROBE_TINY_RAM=${PROBE_TINY_RAM} was set explicitly; keeping it.")
+    endif()
+endif()
 option(PROBE_ENABLE_SYSOSC_FCL "Enable SYSOSC Frequency Correction Loop (FCL) at boot (may require ROSC resistor; locks until BOOTRST)" OFF)
 
 # HFXT crystal support (C1105/C1106 only - C1104 has no HFXT hardware)
 option(PROBE_USE_HFXT "Use external HFXT crystal for MCLK (C1105 only; requires crystal on HFXIN/HFXOUT pins)" OFF)
 set(PROBE_HFXT_FREQ_HZ "32000000" CACHE STRING "HFXT crystal frequency in Hz (used when PROBE_USE_HFXT=ON)")
+if(PROBE_USE_HFXT AND PROBE_HFXT_FREQ_HZ GREATER 40000000)
+    message(FATAL_ERROR "PROBE_HFXT_FREQ_HZ=${PROBE_HFXT_FREQ_HZ} exceeds the C1105 datasheet maximum of 40 MHz")
+endif()
 
 set(_probe_full_feature_default OFF)
 if(NOT PROBE_TINY_RAM)
@@ -73,7 +93,9 @@ elseif(PROBE_DEVICE STREQUAL "MSPM0G5187")
     set(PROBE_STARTUP_SRC "startup/startup_mspm0g518x_gcc.c")
     set(PROBE_LINKER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/linker/mspm0g5187.lds")
     set(PROBE_DRIVERLIB_A "${MSPM0_SDK_PATH}/source/ti/driverlib/lib/gcc/m0p/mspm0g518x/driverlib.a")
-    set(PROBE_CORE_CLK_HZ_DEFAULT "80000000")
+    # The G5187 board currently runs MCLK from SYSOSC at 32 MHz (80 MHz
+    # SYSPLL is a TODO in board_mspm0g5187.c) - keep these in sync.
+    set(PROBE_CORE_CLK_HZ_DEFAULT "32000000")
     set(PROBE_HAS_USB ON)
 else()
     message(FATAL_ERROR "Unknown PROBE_DEVICE='${PROBE_DEVICE}'. Use MSPM0C1104, MSPM0C1105, or MSPM0G5187.")
@@ -98,10 +120,25 @@ elseif(DEFINED PROBE_DEVICE_LAST AND NOT PROBE_DEVICE_LAST STREQUAL PROBE_DEVICE
     endif()
 endif()
 
+# HFXT overrides the core clock; this must run before PROBE_CORE_CLK_HZ is
+# baked into compile definitions below, or the first configure of a fresh
+# build dir would silently build with the wrong clock constant.
+if(PROBE_USE_HFXT)
+    if(NOT PROBE_DEVICE STREQUAL "MSPM0C1105")
+        message(FATAL_ERROR "PROBE_USE_HFXT=ON requires PROBE_DEVICE=MSPM0C1105 (C1104 has no HFXT hardware)")
+    endif()
+    # When using HFXT, core clock = crystal frequency
+    if(NOT PROBE_CORE_CLK_HZ STREQUAL PROBE_HFXT_FREQ_HZ)
+        message(STATUS "PROBE_USE_HFXT=ON: overriding PROBE_CORE_CLK_HZ=${PROBE_CORE_CLK_HZ} -> ${PROBE_HFXT_FREQ_HZ}")
+        set(PROBE_CORE_CLK_HZ "${PROBE_HFXT_FREQ_HZ}" CACHE STRING "Probe core clock frequency in Hz" FORCE)
+    endif()
+endif()
+
 set(PROBE_DEVICE_LAST "${PROBE_DEVICE}" CACHE INTERNAL "Last configured PROBE_DEVICE" FORCE)
 
 add_executable(mspm0_debugger.elf
     main.c
+    src/intmath.c
     src/probe.c
     src/rsp.c
     src/target.c
@@ -139,14 +176,6 @@ if(PROBE_ENABLE_SYSOSC_FCL)
 endif()
 
 if(PROBE_USE_HFXT)
-    if(NOT PROBE_DEVICE STREQUAL "MSPM0C1105")
-        message(FATAL_ERROR "PROBE_USE_HFXT=ON requires PROBE_DEVICE=MSPM0C1105 (C1104 has no HFXT hardware)")
-    endif()
-    # When using HFXT, core clock = crystal frequency
-    if(NOT PROBE_CORE_CLK_HZ STREQUAL PROBE_HFXT_FREQ_HZ)
-        message(STATUS "PROBE_USE_HFXT=ON: overriding PROBE_CORE_CLK_HZ=${PROBE_CORE_CLK_HZ} -> ${PROBE_HFXT_FREQ_HZ}")
-        set(PROBE_CORE_CLK_HZ "${PROBE_HFXT_FREQ_HZ}" CACHE STRING "Probe core clock frequency in Hz" FORCE)
-    endif()
     target_compile_definitions(mspm0_debugger.elf PRIVATE
         PROBE_USE_HFXT=1
         PROBE_HFXT_FREQ_HZ=${PROBE_HFXT_FREQ_HZ}
@@ -262,11 +291,19 @@ target_compile_options(mspm0_debugger.elf PRIVATE
     -fno-common
     -Os
     -g3
+    -Wall
+    -Wextra
+    -Wno-unused-parameter
 )
 
+# -nostartfiles: boot goes through the vector table's resetISR, so crt0 is
+# dead weight - but as the default ELF entry it drags in exit() and newlib's
+# stdio-flush machinery (~440 B of SRAM on the 1KB parts).
 target_link_options(mspm0_debugger.elf PRIVATE
     -mcpu=cortex-m0plus
     -mthumb
+    -nostartfiles
+    -Wl,--entry=Reset_Handler
     -Wl,--gc-sections
     -Wl,--print-memory-usage
     -Wl,-Map=${CMAKE_CURRENT_BINARY_DIR}/mspm0_debugger.map

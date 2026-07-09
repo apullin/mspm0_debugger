@@ -33,7 +33,7 @@
 *****************************************************************************/
 /* Generate a link error if heap and stack don't fit into RAM */
 _Min_Heap_Size  = 0;      /* required amount of heap  */
-_Min_Stack_Size = 0x80; /* required amount of stack */
+_Min_Stack_Size = 0x400; /* required amount of stack (enforced by ASSERT below) */
 
 /* Specify the memory areas */
 /* MSPM0G5187: 128KB Flash, 32KB SRAM */
@@ -198,4 +198,9 @@ SECTIONS
 
     __StackTop = ORIGIN(REGION_STACK) + LENGTH(REGION_STACK);
     PROVIDE(__stack = __StackTop);
+
+    /* The stack grows down from __StackTop toward the end of the statics
+       (_stack). Fail the link if less than _Min_Stack_Size remains. */
+    ASSERT(__StackTop - _stack >= _Min_Stack_Size,
+           "SRAM overflow: statics leave less than _Min_Stack_Size bytes of stack")
 }
