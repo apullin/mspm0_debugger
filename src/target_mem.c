@@ -12,6 +12,7 @@
 // CSW: [2:0]=SIZE, [5:4]=AddrInc, other bits implementation-specific.
 // A common safe value: 0x23000000 (DBGSWENABLE etc.) tolerated by many MEM-APs.
 #define CSW_SIZE_32          (2u)      // 32-bit
+#define CSW_SIZE_8           (0u)      // 8-bit
 #define CSW_ADDRINC_SINGLE   (1u << 4) // increment by one item
 #define CSW_DEFAULT          (0x23000000u)
 
@@ -74,23 +75,34 @@ bool target_mem_write_word(uint32_t addr, uint32_t v)
 
 bool target_mem_read_bytes_impl(uint32_t addr, uint8_t *buf, uint32_t len)
 {
+    if (len != 0u && (!buf || addr > UINT32_MAX - (len - 1u))) {
+        return false;
+    }
+
     while (len) {
-        uint32_t aligned = addr & ~3u;
-        uint32_t w       = 0;
-        if (!target_mem_read_word(aligned, &w)) {
+        // Use native MEM-AP byte transfers.  Word-sized reads of peripheral
+        // FIFOs and clear-on-read registers can have destructive side effects.
+        if (!memap_set_csw_ap(g_memap_ap_sel, CSW_DEFAULT | CSW_SIZE_8) ||
+            !memap_set_tar_ap(g_memap_ap_sel, addr)) {
             return false;
         }
-        for (uint32_t i = (addr & 3u); i < 4u && len; i++) {
-            *buf++ = (uint8_t) ((w >> (8u * i)) & 0xFFu);
-            addr++;
-            len--;
+        uint32_t w = 0u;
+        if (!memap_read_drw_ap(g_memap_ap_sel, &w)) {
+            return false;
         }
+        *buf++ = (uint8_t) (w >> (8u * (addr & 3u)));
+        addr++;
+        len--;
     }
     return true;
 }
 
 bool target_mem_write_bytes_impl(uint32_t addr, const uint8_t *buf, uint32_t len)
 {
+    if (len != 0u && (!buf || addr > UINT32_MAX - (len - 1u))) {
+        return false;
+    }
+
     while (len) {
         uint32_t offset = addr & 3u;
 
@@ -111,22 +123,18 @@ bool target_mem_write_bytes_impl(uint32_t addr, const uint8_t *buf, uint32_t len
             continue;
         }
 
-        // Slow path: unaligned or partial word - need RMW
-        uint32_t aligned = addr & ~3u;
-        uint32_t w       = 0;
-        if (!target_mem_read_word(aligned, &w)) {
+        // Native byte writes avoid read-modify-write side effects on MMIO.
+        if (!memap_set_csw_ap(g_memap_ap_sel, CSW_DEFAULT | CSW_SIZE_8) ||
+            !memap_set_tar_ap(g_memap_ap_sel, addr)) {
             return false;
         }
-
-        for (uint32_t i = offset; i < 4u && len; i++) {
-            uint32_t mask = 0xFFu << (8u * i);
-            w             = (w & ~mask) | ((uint32_t) (*buf++) << (8u * i));
-            addr++;
-            len--;
-        }
-        if (!target_mem_write_word(aligned, w)) {
+        uint32_t lane_value = (uint32_t) *buf << (8u * offset);
+        if (!memap_write_drw_ap(g_memap_ap_sel, lane_value)) {
             return false;
         }
+        buf++;
+        addr++;
+        len--;
     }
     return true;
 }

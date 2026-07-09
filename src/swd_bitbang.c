@@ -1,6 +1,10 @@
 // SWD wire (bit-bang)
 // SWD bit order: LSB-first for requests/data.
-// Sampling: SWD samples on rising edge of SWCLK (common probe behavior).
+// Timing: both sides sample SWDIO on the rising edge of SWCLK, and the target
+// launches its next output bit off that same edge (Tos as low as 2 ns). The
+// host therefore drives outgoing bits during the low phase and samples
+// incoming bits at the end of the low phase, before generating the rising
+// edge (same scheme as the CMSIS-DAP reference bit-bang).
 
 #include "swd_bitbang.h"
 
@@ -37,8 +41,8 @@ static int swd_read_bit(void)
 {
     swclk_write(0);
     swd_delay();
+    int b = swdio_read() ? 1 : 0; // sample before the rising edge
     swclk_write(1);
-    int b = swdio_read() ? 1 : 0;
     swd_delay();
     return b;
 }
@@ -111,10 +115,18 @@ void swd_jtag_to_swd(void)
 
     swd_line_reset();
 
-    // Idle (at least 2 cycles)
-    swdio_write(1);
-    swd_clk_cycle();
-    swd_clk_cycle();
+    // Idle cycles (SWDIO low). The DP treats a high bit on an idle bus as a
+    // Start bit, so idle must be driven low; at least 2 cycles are required
+    // after a line reset before the first request.
+    swd_idle_cycles(4);
+}
+
+void swd_resync(void)
+{
+    // Recover from a protocol desync: line reset, then idle-low.
+    // Per ADIv5 the caller must read DPIDR before any other request.
+    swd_line_reset();
+    swd_idle_cycles(4);
 }
 
 static uint8_t parity_u32(uint32_t v)
@@ -170,14 +182,15 @@ static bool swd_read_u32(uint32_t *out)
         v |= ((uint32_t) swd_read_bit() << i);
     }
     int p = swd_read_bit();
+
+    // Take the bus back and idle low even on parity failure, so the wire
+    // stays in sync and the caller can retry or resync.
+    swd_turnaround_to_write();
+    swd_idle_cycles(2);
+
     if ((parity_u32(v) & 1u) != (uint8_t) p) {
         return false;
     }
-
-    // Idle cycle (master drives 1)
-    swd_turnaround_to_write();
-    swdio_write(1);
-    swd_clk_cycle();
 
     *out = v;
     return true;
@@ -190,12 +203,11 @@ static void swd_write_u32(uint32_t v)
     }
     swd_write_bit(parity_u32(v) & 1u);
 
-    // Idle cycle
-    swdio_write(1);
-    swd_clk_cycle();
+    // Idle cycles (SWDIO low)
+    swd_idle_cycles(2);
 }
 
-bool swd_transfer(bool ap, bool rnw, uint8_t addr2, uint32_t *data_inout)
+swd_xfer_status_t swd_transfer(bool ap, bool rnw, uint8_t addr2, uint32_t *data_inout)
 {
     // Build 8-bit request (LSB-first):
     // start(1), APnDP, RnW, A2, A3, parity, stop(0), park(1)
@@ -219,35 +231,33 @@ bool swd_transfer(bool ap, bool rnw, uint8_t addr2, uint32_t *data_inout)
     swd_turnaround_to_read();
     swd_ack_t ack = swd_read_ack();
 
-    if (ack == SWD_ACK_WAIT) {
-        // Leave bus idle cleanly (turnaround back to write + idle)
-        swd_turnaround_to_write();
-        swdio_write(1);
-        swd_clk_cycle();
-        return false;
-    }
     if (ack != SWD_ACK_OK) {
-        // Fault or protocol error
+        // No data phase follows WAIT/FAULT (overrun detection is not
+        // enabled). Take the bus back and leave it idle low.
         swd_turnaround_to_write();
-        swdio_write(1);
-        swd_clk_cycle();
-        return false;
+        swd_idle_cycles(2);
+        if (ack == SWD_ACK_WAIT) {
+            return SWD_XFER_WAIT;
+        }
+        if (ack == SWD_ACK_FAULT) {
+            return SWD_XFER_FAULT;
+        }
+        return SWD_XFER_PROTOCOL;
     }
 
     if (rnw) {
         // Read data phase (target drives)
         uint32_t v;
-        bool ok = swd_read_u32(&v);
-        if (!ok) {
-            return false;
+        if (!swd_read_u32(&v)) {
+            return SWD_XFER_PARITY;
         }
         *data_inout = v;
-        return true;
+        return SWD_XFER_OK;
     }
 
     // Turnaround to write then write data
     swd_turnaround_to_write();
     swd_write_u32(*data_inout);
-    return true;
+    return SWD_XFER_OK;
 }
 
