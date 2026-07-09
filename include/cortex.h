@@ -42,6 +42,7 @@ bool cortex_read_core_reg(uint32_t regnum, uint32_t *out);
 bool cortex_write_core_reg(uint32_t regnum, uint32_t v);
 
 void cortex_breakpoints_init(void);
+bool cortex_debug_resources_clear(void);
 bool cortex_breakpoint_insert(uint32_t addr);
 bool cortex_breakpoint_remove(uint32_t addr);
 

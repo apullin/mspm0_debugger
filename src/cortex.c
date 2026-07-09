@@ -26,6 +26,7 @@
 #define DHCSR_C_DEBUGEN  (1u << 0)
 #define DHCSR_C_HALT     (1u << 1)
 #define DHCSR_C_STEP     (1u << 2)
+#define DHCSR_C_MASKINTS (1u << 3)
 #define DHCSR_S_REGRDY   (1u << 16)
 #define DHCSR_S_HALT     (1u << 17)
 
@@ -52,9 +53,12 @@
 #define DWT_FUNC_V2_ACTION_DBG_EVENT (1u << 4)
 #define DWT_FUNC_V2_LEN_VALUE(len)  (((len) >> 1) << 10)
 
-static uint32_t dwt_comp_reg(uint8_t slot) { return DWT_COMP0 + 0x20u * (uint32_t) slot; }
-static uint32_t dwt_mask_reg(uint8_t slot) { return DWT_MASK0 + 0x20u * (uint32_t) slot; }
-static uint32_t dwt_func_reg(uint8_t slot) { return DWT_FUNC0 + 0x20u * (uint32_t) slot; }
+#if defined(PROBE_ENABLE_DWT_WATCHPOINTS) && (PROBE_ENABLE_DWT_WATCHPOINTS)
+// DWT_COMPn/MASKn/FUNCTIONn are architecturally spaced 0x10 apart.
+static uint32_t dwt_comp_reg(uint8_t slot) { return DWT_COMP0 + 0x10u * (uint32_t) slot; }
+static uint32_t dwt_mask_reg(uint8_t slot) { return DWT_MASK0 + 0x10u * (uint32_t) slot; }
+static uint32_t dwt_func_reg(uint8_t slot) { return DWT_FUNC0 + 0x10u * (uint32_t) slot; }
+#endif
 
 typedef struct {
     uint32_t addr;
@@ -63,9 +67,14 @@ typedef struct {
 
 static bool     g_fpb_inited   = false;
 static uint8_t  g_fpb_num_code = 0;
+static uint8_t  g_fpb_rev      = 0; // FP_CTRL[31:28]: 0 = FPB v1, 1 = FPB v2
 static fpb_slot_t g_fpb_slots[8];
 
 static cortexm_target_t g_target = CORTEXM_TARGET_UNKNOWN;
+// Once C_MASKINTS may have been set for a step, do not resume the core until
+// a read-back-confirmed halt has allowed us to clear it again. Keep this
+// sticky across transient transport failures so a later command can retry.
+static bool g_step_maskints_cleanup_pending = false;
 
 #if defined(PROBE_ENABLE_DWT_WATCHPOINTS) && (PROBE_ENABLE_DWT_WATCHPOINTS)
 #define DWT_MAX_SLOTS 4u
@@ -115,7 +124,7 @@ static const char g_target_xml_v7m[] =
     "<?xml version=\"1.0\"?>\n"
     "<!DOCTYPE target SYSTEM \"gdb-target.dtd\">\n"
     "<target>\n"
-    "  <architecture>armv7-m</architecture>\n"
+    "  <architecture>armv7</architecture>\n"
     "  <feature name=\"org.gnu.gdb.arm.m-profile\">\n"
     "    <reg name=\"r0\" bitsize=\"32\"/>\n"
     "    <reg name=\"r1\" bitsize=\"32\"/>\n"
@@ -219,10 +228,12 @@ static const char *g_target_xml     = NULL;
 static uint32_t    g_target_xml_len = 0;
 #endif
 
+#if defined(PROBE_ENABLE_DWT_WATCHPOINTS) && (PROBE_ENABLE_DWT_WATCHPOINTS)
 static bool cortex_target_is_v8m(void)
 {
     return g_target == CORTEXM_TARGET_M23 || g_target == CORTEXM_TARGET_M33 || g_target == CORTEXM_TARGET_M55;
 }
+#endif
 
 static bool is_valid_arm_cpuid(uint32_t cpuid)
 {
@@ -269,16 +280,43 @@ void cortex_target_init(void)
 {
     // CPUID partno values (bits [15:4])
     // See ARM Cortex-M TRMs / ARM ARM.
-    const uint16_t PARTNO_CM0  = 0xC20u;
-    const uint16_t PARTNO_CM0P = 0xC60u;
-    const uint16_t PARTNO_CM3  = 0xC23u;
-    const uint16_t PARTNO_CM4  = 0xC24u;
-    const uint16_t PARTNO_CM7  = 0xC27u;
-    const uint16_t PARTNO_CM23 = 0xD20u;
-    const uint16_t PARTNO_CM33 = 0xD21u;
-    const uint16_t PARTNO_CM55 = 0xD22u;
+    enum {
+        PARTNO_CM0  = 0xC20,
+        PARTNO_CM0P = 0xC60,
+        PARTNO_CM3  = 0xC23,
+        PARTNO_CM4  = 0xC24,
+        PARTNO_CM7  = 0xC27,
+        PARTNO_CM23 = 0xD20,
+        PARTNO_CM33 = 0xD21,
+        PARTNO_CM55 = 0xD22,
+    };
 
-    g_target = CORTEXM_TARGET_UNKNOWN;
+    // A new attach may be a reset or an entirely different target.  Never
+    // carry comparator counts/ownership or a cached XML selection across it.
+    g_target       = CORTEXM_TARGET_UNKNOWN;
+    g_fpb_inited   = false;
+    g_fpb_num_code = 0u;
+    g_fpb_rev      = 0u;
+    for (uint8_t i = 0; i < (uint8_t) (sizeof(g_fpb_slots) / sizeof(g_fpb_slots[0])); i++) {
+        g_fpb_slots[i].used = false;
+        g_fpb_slots[i].addr = 0u;
+    }
+#if defined(PROBE_ENABLE_DWT_WATCHPOINTS) && (PROBE_ENABLE_DWT_WATCHPOINTS)
+    g_dwt_inited   = false;
+    g_dwt_ok       = false;
+    g_dwt_num_comp = 0u;
+    for (uint8_t i = 0; i < DWT_MAX_SLOTS; i++) {
+        g_dwt_slots[i].used = false;
+        g_dwt_slots[i].addr = 0u;
+        g_dwt_slots[i].len  = 0u;
+        g_dwt_slots[i].type = CORTEXM_WATCH_ACCESS;
+        g_dwt_slots[i].slot = i;
+    }
+#endif
+#if defined(PROBE_ENABLE_QXFER_TARGET_XML) && (PROBE_ENABLE_QXFER_TARGET_XML)
+    g_target_xml     = NULL;
+    g_target_xml_len = 0u;
+#endif
 
     uint32_t cpuid = 0;
     if (!select_memap_by_cpuid(&cpuid)) {
@@ -412,44 +450,136 @@ static bool cortex_read_dhcsr(uint32_t *out)
     return target_mem_read_word(DHCSR, out);
 }
 
+static bool cortex_wait_halted(void)
+{
+    uint32_t start = hal_time_us();
+    while ((hal_time_us() - start) < REG_ACCESS_TIMEOUT_US) {
+        uint32_t dhcsr = 0u;
+        if (!cortex_read_dhcsr(&dhcsr)) {
+            return false;
+        }
+        if ((dhcsr & DHCSR_S_HALT) != 0u) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool cortex_step_maskints_clear(bool halt_confirmed)
+{
+    if (!g_step_maskints_cleanup_pending) {
+        return true;
+    }
+
+    // If a STEP release or poll failed, the core's state is ambiguous. Halt
+    // it while preserving C_MASKINTS, then confirm S_HALT before changing the
+    // mask bit (an architectural requirement).
+    if (!halt_confirmed) {
+        if (!cortex_write_dhcsr(DHCSR_C_DEBUGEN | DHCSR_C_HALT |
+                                DHCSR_C_MASKINTS) ||
+            !cortex_wait_halted()) {
+            return false;
+        }
+    }
+
+    if (!cortex_write_dhcsr(DHCSR_C_DEBUGEN | DHCSR_C_HALT)) {
+        return false;
+    }
+    g_step_maskints_cleanup_pending = false;
+    return true;
+}
+
 bool cortex_halt(void)
 {
-    // Enable debug + halt
-    return cortex_write_dhcsr(DHCSR_C_DEBUGEN | DHCSR_C_HALT);
+    if (g_step_maskints_cleanup_pending) {
+        return cortex_step_maskints_clear(false);
+    }
+    if (!cortex_write_dhcsr(DHCSR_C_DEBUGEN | DHCSR_C_HALT)) {
+        return false;
+    }
+
+    // The DHCSR write requests a halt; it does not prove that the core has
+    // observed it.  Do not let register/flash operations race a running core.
+    return cortex_wait_halted();
 }
 
 bool cortex_continue(void)
 {
-    // Debug enable, clear halt/step
-    return cortex_write_dhcsr(DHCSR_C_DEBUGEN);
+    if (!cortex_step_maskints_clear(false)) {
+        return false;
+    }
+    // Request resume, then wait until the core has actually left Debug state.
+    // Otherwise the next RSP poll can observe the old S_HALT and report an
+    // immediate false stop without executing an instruction.
+    if (!cortex_write_dhcsr(DHCSR_C_DEBUGEN)) {
+        // AP-write failure is ambiguous: the resume may have reached DHCSR
+        // even if its posted completion failed. Restore a known halted state.
+        (void) cortex_halt();
+        return false;
+    }
+    uint32_t start = hal_time_us();
+    while ((hal_time_us() - start) < REG_ACCESS_TIMEOUT_US) {
+        uint32_t dhcsr = 0u;
+        if (!cortex_read_dhcsr(&dhcsr)) {
+            break;
+        }
+        if ((dhcsr & DHCSR_S_HALT) == 0u) {
+            return true;
+        }
+    }
+    // A timeout/read fault after the resume request may leave the core
+    // running. Best-effort re-halt so an E01 never silently loses ownership.
+    (void) cortex_halt();
+    return false;
 }
 
 bool cortex_step(void)
 {
+    if (!cortex_step_maskints_clear(false)) {
+        return false;
+    }
+
     // Halt first to ensure known state.
     if (!cortex_halt()) {
         return false;
     }
 
-    // Set C_STEP to request single-step. Processor will execute one instruction
-    // then halt and clear C_STEP automatically.
-    if (!cortex_write_dhcsr(DHCSR_C_DEBUGEN | DHCSR_C_STEP)) {
+    // Mask interrupts while stepping so the step lands on the next user
+    // instruction instead of the first instruction of a pending ISR.
+    // C_MASKINTS may only be changed while C_HALT is written as 1.
+    // Treat even a failed transport write as potentially applied; cleanup is
+    // sticky until a later read-back-confirmed halt lets us clear MASKINTS.
+    g_step_maskints_cleanup_pending = true;
+    if (!cortex_write_dhcsr(DHCSR_C_DEBUGEN | DHCSR_C_HALT | DHCSR_C_MASKINTS)) {
+        (void) cortex_step_maskints_clear(false);
+        return false;
+    }
+
+    // Release halt with step requested; C_MASKINTS is held at its current
+    // value so this write is architecturally allowed.
+    if (!cortex_write_dhcsr(DHCSR_C_DEBUGEN | DHCSR_C_MASKINTS | DHCSR_C_STEP)) {
+        (void) cortex_step_maskints_clear(false);
         return false;
     }
 
     // Wait for step to complete (S_HALT set) with timeout.
-    // ARM says C_STEP auto-clears when step completes.
+    bool halted = false;
     uint32_t start = hal_time_us();
     while ((hal_time_us() - start) < REG_ACCESS_TIMEOUT_US) {
         uint32_t dh = 0;
         if (!cortex_read_dhcsr(&dh)) {
-            return false;
+            break;
         }
         if (dh & DHCSR_S_HALT) {
-            return true;  // Step completed, target halted
+            halted = true;
+            break;
         }
     }
-    return false;  // Timeout waiting for step to complete
+
+    // On timeout/read failure, first force and confirm a halt while retaining
+    // MASKINTS. A failed final clear is a failed step, never a false S05.
+    bool cleaned = cortex_step_maskints_clear(halted);
+    return halted && cleaned;
 }
 
 bool cortex_is_halted(bool *halted)
@@ -534,10 +664,21 @@ bool cortex_write_gdb_regs(const uint32_t regs[17])
     return cortex_write_core_reg(16, regs[16]);
 }
 
-static uint32_t fpb_comp_value(uint32_t addr)
+static bool fpb_comp_value(uint32_t addr, uint32_t *out)
 {
+    if (g_fpb_rev >= 1u) {
+        // FPB v2 (Cortex-M7 and v8-M): FP_COMPn = BPADDR[31:1], bit0 = BE.
+        *out = (addr & 0xFFFFFFFEu) | 1u;
+        return true;
+    }
+    // FPB v1 (M0/M0+/M3/M4): COMP[28:2] + REPLACE halfword select. The
+    // comparator can only match code addresses below 0x20000000.
+    if (addr >= 0x20000000u) {
+        return false;
+    }
     uint32_t replace = (addr & 2u) ? (2u << 30) : (1u << 30);
-    return (addr & 0x1FFFFFFCu) | replace | 1u;
+    *out = (addr & 0x1FFFFFFCu) | replace | 1u;
+    return true;
 }
 
 #if defined(PROBE_ENABLE_DWT_WATCHPOINTS) && (PROBE_ENABLE_DWT_WATCHPOINTS)
@@ -609,8 +750,7 @@ static bool cortex_dwt_init(void)
     if (g_dwt_inited) {
         return g_dwt_ok;
     }
-    g_dwt_inited = true;
-    g_dwt_ok     = false;
+    g_dwt_ok = false;
 
     g_dwt_num_comp = 0;
     for (uint8_t i = 0; i < DWT_MAX_SLOTS; i++) {
@@ -642,9 +782,13 @@ static bool cortex_dwt_init(void)
     g_dwt_num_comp = num;
 
     for (uint8_t i = 0; i < g_dwt_num_comp; i++) {
-        (void) target_mem_write_word(dwt_func_reg(i), 0u);
+        if (!target_mem_write_word(dwt_func_reg(i), 0u)) {
+            g_dwt_num_comp = 0u;
+            return false;
+        }
     }
 
+    g_dwt_inited = true;
     g_dwt_ok = true;
     return true;
 }
@@ -655,15 +799,16 @@ void cortex_breakpoints_init(void)
     if (g_fpb_inited) {
         return;
     }
-    g_fpb_inited = true;
-
     uint32_t ctrl = 0;
     if (!target_mem_read_word(FPB_CTRL, &ctrl)) {
         g_fpb_num_code = 0;
         return;
     }
 
-    uint8_t num_code = (uint8_t) ((ctrl >> 4) & 0x0Fu);
+    g_fpb_rev = (uint8_t) ((ctrl >> 28) & 0x0Fu);
+
+    uint8_t num_code = (uint8_t) (((ctrl >> 4) & 0x0Fu) |
+                                  ((ctrl >> 8) & 0x70u));
     if (num_code > (uint8_t) (sizeof(g_fpb_slots) / sizeof(g_fpb_slots[0]))) {
         num_code = (uint8_t) (sizeof(g_fpb_slots) / sizeof(g_fpb_slots[0]));
     }
@@ -675,20 +820,79 @@ void cortex_breakpoints_init(void)
     }
 
     if (g_fpb_num_code == 0) {
+        g_fpb_inited = true;
         return;
     }
 
-    // Enable FPB
-    (void) target_mem_write_word(FPB_CTRL, ctrl | 1u);
+    // Enable FPB. Writes to FP_CTRL are ignored unless KEY (bit 1) is
+    // written as 1 (KEY reads as zero), so ENABLE must go in with KEY set.
+    if (!target_mem_write_word(FPB_CTRL, ctrl | 3u)) {
+        g_fpb_num_code = 0u;
+        return;
+    }
 
     // Clear any stale comparators
     for (uint8_t i = 0; i < g_fpb_num_code; i++) {
-        (void) target_mem_write_word(FPB_COMP0 + 4u * (uint32_t) i, 0u);
+        if (!target_mem_write_word(FPB_COMP0 + 4u * (uint32_t) i, 0u)) {
+            g_fpb_num_code = 0u;
+            return;
+        }
     }
+
+    g_fpb_inited = true;
 
 #if defined(PROBE_ENABLE_DWT_WATCHPOINTS) && (PROBE_ENABLE_DWT_WATCHPOINTS)
     (void) cortex_dwt_init();
 #endif
+}
+
+bool cortex_debug_resources_clear(void)
+{
+    bool ok = true;
+
+    if (!cortex_step_maskints_clear(false)) {
+        ok = false;
+    }
+
+    if (g_fpb_inited) {
+        for (uint8_t i = 0; i < g_fpb_num_code; i++) {
+            if (g_fpb_slots[i].used) {
+                if (target_mem_write_word(FPB_COMP0 + 4u * (uint32_t) i, 0u)) {
+                    g_fpb_slots[i].used = false;
+                    g_fpb_slots[i].addr = 0u;
+                } else {
+                    ok = false;
+                }
+            }
+        }
+    }
+
+#if defined(PROBE_ENABLE_DWT_WATCHPOINTS) && (PROBE_ENABLE_DWT_WATCHPOINTS)
+    if (g_dwt_inited) {
+        for (uint8_t i = 0; i < g_dwt_num_comp; i++) {
+            if (!g_dwt_slots[i].used) {
+                continue;
+            }
+            uint8_t slot = g_dwt_slots[i].slot;
+            bool cleared = target_mem_write_word(dwt_func_reg(slot), 0u);
+            if (cleared && !cortex_target_is_v8m()) {
+                cleared = target_mem_write_word(dwt_mask_reg(slot), 0u);
+            }
+            if (cleared) {
+                cleared = target_mem_write_word(dwt_comp_reg(slot), 0u);
+            }
+            if (cleared) {
+                g_dwt_slots[i].used = false;
+                g_dwt_slots[i].addr = 0u;
+                g_dwt_slots[i].len  = 0u;
+            } else {
+                ok = false;
+            }
+        }
+    }
+#endif
+
+    return ok;
 }
 
 bool cortex_breakpoint_insert(uint32_t addr)
@@ -709,7 +913,10 @@ bool cortex_breakpoint_insert(uint32_t addr)
 
     for (uint8_t i = 0; i < g_fpb_num_code; i++) {
         if (!g_fpb_slots[i].used) {
-            uint32_t comp = fpb_comp_value(addr);
+            uint32_t comp = 0;
+            if (!fpb_comp_value(addr, &comp)) {
+                return false; // address not encodable on this FPB revision
+            }
             if (!target_mem_write_word(FPB_COMP0 + 4u * (uint32_t) i, comp)) {
                 return false;
             }
@@ -772,13 +979,19 @@ bool cortex_watchpoint_insert(cortexm_watch_t type, uint32_t addr, uint32_t len)
         return false;
     }
 
+    if (len == 0u || !is_power_of_two_u32(len) ||
+        (addr & (len - 1u)) != 0u) {
+        return false;
+    }
+
     uint32_t func = 0;
     if (cortex_target_is_v8m()) {
-        func = dwt_v2_func(type, len);
-    } else {
-        if (!is_power_of_two_u32(len)) {
+        // DATAVSIZE is 2 bits: byte/halfword/word only.
+        if (len > 4u) {
             return false;
         }
+        func = dwt_v2_func(type, len);
+    } else {
         func = dwt_v1_func(type, len);
     }
     if (func == 0u) {
@@ -786,9 +999,6 @@ bool cortex_watchpoint_insert(cortexm_watch_t type, uint32_t addr, uint32_t len)
     }
 
     uint32_t comp = addr;
-    if (len >= 2u && is_power_of_two_u32(len)) {
-        comp = addr & ~(len - 1u);
-    }
 
     if (!target_mem_write_word(dwt_comp_reg(slot), comp)) {
         return false;
@@ -841,9 +1051,16 @@ bool cortex_watchpoint_remove(cortexm_watch_t type, uint32_t addr, uint32_t len)
         if (g_dwt_slots[i].used && g_dwt_slots[i].addr == addr && g_dwt_slots[i].len == len &&
             g_dwt_slots[i].type == type) {
             uint8_t slot = g_dwt_slots[i].slot;
-            (void) target_mem_write_word(dwt_func_reg(slot), 0u);
-            (void) target_mem_write_word(dwt_mask_reg(slot), 0u);
-            (void) target_mem_write_word(dwt_comp_reg(slot), 0u);
+            if (!target_mem_write_word(dwt_func_reg(slot), 0u)) {
+                return false;
+            }
+            if (!cortex_target_is_v8m() &&
+                !target_mem_write_word(dwt_mask_reg(slot), 0u)) {
+                return false;
+            }
+            if (!target_mem_write_word(dwt_comp_reg(slot), 0u)) {
+                return false;
+            }
             g_dwt_slots[i].used = false;
             g_dwt_slots[i].addr = 0;
             g_dwt_slots[i].len  = 0;
