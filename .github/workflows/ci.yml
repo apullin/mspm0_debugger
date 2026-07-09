@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  host-tests:
+    name: Host tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S tests -B build_tests -DCMAKE_BUILD_TYPE=RelWithDebInfo
+      - name: Build
+        run: cmake --build build_tests --parallel
+      - name: Test
+        run: ctest --test-dir build_tests --output-on-failure
+
+  firmware:
+    name: Firmware (${{ matrix.device }}, ${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        device: [MSPM0C1104, MSPM0C1105, MSPM0G5187]
+        arch: [cortex, riscv, dual]
+        include:
+          - arch: cortex
+            arch_args: >-
+              -DPROBE_ENABLE_CORTEXM=ON
+              -DPROBE_ENABLE_JTAG=OFF
+              -DPROBE_ENABLE_RISCV=OFF
+          - arch: riscv
+            arch_args: >-
+              -DPROBE_ENABLE_CORTEXM=OFF
+              -DPROBE_ENABLE_JTAG=ON
+              -DPROBE_ENABLE_RISCV=ON
+          - arch: dual
+            arch_args: >-
+              -DPROBE_ENABLE_CORTEXM=ON
+              -DPROBE_ENABLE_JTAG=ON
+              -DPROBE_ENABLE_RISCV=ON
+          - device: MSPM0C1104
+            arch: cortex-legacy-no-xml
+            arch_args: >-
+              -DPROBE_ENABLE_CORTEXM=ON
+              -DPROBE_ENABLE_JTAG=OFF
+              -DPROBE_ENABLE_RISCV=OFF
+              -DPROBE_ENABLE_QXFER_TARGET_XML=OFF
+          - device: MSPM0G5187
+            arch: cortex-no-vcom
+            arch_args: >-
+              -DPROBE_ENABLE_CORTEXM=ON
+              -DPROBE_ENABLE_JTAG=OFF
+              -DPROBE_ENABLE_RISCV=OFF
+              -DPROBE_ENABLE_VCOM=OFF
+          - device: MSPM0C1105
+            arch: cortex-hfxt-32mhz
+            arch_args: >-
+              -DPROBE_ENABLE_CORTEXM=ON
+              -DPROBE_ENABLE_JTAG=OFF
+              -DPROBE_ENABLE_RISCV=OFF
+              -DPROBE_USE_HFXT=ON
+              -DPROBE_HFXT_FREQ_HZ=32000000
+          - device: MSPM0C1105
+            arch: cortex-hfxt-12_288mhz
+            arch_args: >-
+              -DPROBE_ENABLE_CORTEXM=ON
+              -DPROBE_ENABLE_JTAG=OFF
+              -DPROBE_ENABLE_RISCV=OFF
+              -DPROBE_USE_HFXT=ON
+              -DPROBE_HFXT_FREQ_HZ=12288000
+          - device: MSPM0C1105
+            arch: riscv-ir32
+            arch_args: >-
+              -DPROBE_ENABLE_CORTEXM=OFF
+              -DPROBE_ENABLE_JTAG=ON
+              -DPROBE_ENABLE_RISCV=ON
+              -DPROBE_RISCV_JTAG_IR_LEN=32
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out TI MSPM0 SDK
+        uses: actions/checkout@v4
+        with:
+          repository: TexasInstruments/mspm0-sdk
+          ref: mspm0_sdk_2_09_00_01
+          path: ti-sdk
+          lfs: true
+          sparse-checkout: |
+            source/ti/devices
+            source/ti/driverlib
+            source/third_party/CMSIS
+            source/third_party/tinyusb
+
+      - name: Install Arm GNU toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends \
+            gcc-arm-none-eabi \
+            libnewlib-arm-none-eabi
+
+      - name: Configure
+        run: >-
+          cmake -S . -B build_firmware
+          -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-gcc.cmake
+          -DMSPM0_SDK_PATH=${{ github.workspace }}/ti-sdk
+          -DPROBE_DEVICE=${{ matrix.device }}
+          -DPROBE_ALLOW_ODIO_SWD_PINS=ON
+          -DPROBE_WARNINGS_AS_ERRORS=ON
+          ${{ matrix.arch_args }}
+
+      - name: Build
+        run: cmake --build build_firmware --parallel
+
+      - name: Verify generated images
+        run: test -s build_firmware/mspm0_debugger.elf -a -s build_firmware/mspm0_debugger.hex -a -s build_firmware/mspm0_debugger.bin

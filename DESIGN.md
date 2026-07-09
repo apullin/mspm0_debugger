@@ -8,11 +8,13 @@ This repo now uses a split, module-based layout:
 
 - `main.c`: calls `board_init()` and runs `probe_poll()`.
 - `hal.h`: minimal HAL (UART, delay, SWD GPIO).
-- `src/board_mspm0c1104.c`, `src/board_mspm0c1105.c`: MSPM0 DriverLib bring-up + HAL implementation.
+- `src/board_mspm0c1104.c`, `src/board_mspm0c1105.c`, `src/board_mspm0g5187.c`: MSPM0 DriverLib bring-up + HAL implementation.
 - `src/swd_bitbang.c`: SWD wire protocol bit-bang (turnaround, ACK, parity).
 - `src/adiv5.c`: ADIv5 Debug Port / Access Port transactions (this is ARM “Debug Interface v5”, not “division”).
 - `src/target_mem.c`: memory reads/writes via AHB‑AP.
 - `src/cortex.c`: Cortex‑M debug (DHCSR/DCRSR), halt/step/continue, FPB breakpoints.
+- `src/intmath.c`: compact unsigned 64-by-32 division for exact clock scaling
+  without the large generic Cortex-M0+ runtime helper.
 - `src/rsp.c`: UART RSP packet parser + command handling.
 - `src/probe.c`: glue between RSP and SWD/ADIv5/Cortex.
 
@@ -22,10 +24,16 @@ Probe clocks:
 
 - `MSPM0C1104` (“tiny”): use SYSOSC base frequency (24 MHz per MSPM0C110x datasheet/DFP metadata).
 - `MSPM0C1105` (“bigger”): use SYSOSC base frequency (32 MHz).
+- `MSPM0G5187` (“USB”): currently use SYSOSC at 32 MHz; USB has a separate 48 MHz USBFLL clock.
 
-Timing uses a free-running SysTick (24-bit) in `delay_us()`.
+Timing uses a free-running SysTick (24-bit). `delay_us()` and `hal_time_us()`
+retain sub-MHz clock fractions through the project-owned divider/remainder path.
 
-GPIO's : just pick any for now. The schematic is not set. But it should only be a few pins, and we can just edit this later.
+The schematic is not set. The placeholder PA0/PA1 mapping for shared
+SWCLK/TCK and SWDIO/TMS uses ODIO pins, which cannot drive a production debug
+clock; configuration fails unless the developer
+explicitly acknowledges it with `PROBE_ALLOW_ODIO_SWD_PINS=ON`. Final hardware
+must move both shared debug signals to SDIO/HSIO-capable pins.
 
 When we have this all building, we check the consumed resources (linker prints memory usage, and we also run `arm-none-eabi-size`).
 
@@ -44,14 +52,14 @@ Toolchain: `arm-none-eabi-gcc` via `cmake/toolchains/arm-gcc.cmake`.
 
 SDK path is a CMake cache variable:
 
-- `MSPM0_SDK_PATH` defaults to `/Applications/ti/mspm0_sdk_2_08_00_03/`
+- `MSPM0_SDK_PATH` defaults to `/Applications/ti/mspm0_sdk_2_09_00_01/`
 
 Targets:
 
 - C1104 tiny (recommended for “does it fit in 1KB SRAM?”):
-  - `cmake -S . -B build_c1104 -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-gcc.cmake -DPROBE_DEVICE=MSPM0C1104 -DPROBE_TINY_RAM=ON`
+  - `cmake -S . -B build_c1104 -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-gcc.cmake -DPROBE_DEVICE=MSPM0C1104 -DPROBE_TINY_RAM=ON -DPROBE_ALLOW_ODIO_SWD_PINS=ON`
 - C1105 bigger (“full feature”):
-  - `cmake -S . -B build_c1105 -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-gcc.cmake -DPROBE_DEVICE=MSPM0C1105 -DPROBE_TINY_RAM=OFF`
+  - `cmake -S . -B build_c1105 -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-gcc.cmake -DPROBE_DEVICE=MSPM0C1105 -DPROBE_TINY_RAM=OFF -DPROBE_ALLOW_ODIO_SWD_PINS=ON`
     - Defaults to enabling `qXfer:features:read` target XML and DWT watchpoints; override with:
       - `-DPROBE_ENABLE_QXFER_TARGET_XML=OFF`
       - `-DPROBE_ENABLE_DWT_WATCHPOINTS=OFF`
@@ -64,4 +72,5 @@ Then build:
 Notes:
 
 - Link uses `-Wl,--print-memory-usage` (and produces `mspm0_debugger.map`).
-- If you change `PROBE_DEVICE` inside an existing build directory, clear the cache or use a fresh `build_*` dir to avoid stale per-device settings.
+- Device-dependent generated defaults and the derived board clock migrate when
+  `PROBE_DEVICE` changes, but separate build directories remain easier to inspect.
