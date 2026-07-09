@@ -66,7 +66,10 @@ uint32_t jtag_read_idcode(void);
 // Read DTMCS register.
 uint32_t jtag_read_dtmcs(void);
 
+// Clear the DTM's sticky DMI busy/error state (dtmcs.dmireset).
+void jtag_dmi_reset(void);
+
 // DMI read/write (address width and data come from DTMCS).
-// Returns true on success, false on error (busy/error in op field).
+// Retries on busy (with dmireset recovery); returns false on real errors.
 bool jtag_dmi_read(uint32_t addr, uint32_t *data);
 bool jtag_dmi_write(uint32_t addr, uint32_t data);

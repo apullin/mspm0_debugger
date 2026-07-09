@@ -15,11 +15,22 @@
 
 static jtag_state_t g_tap_state = JTAG_STATE_RESET;
 
-// IR length for RISC-V DTM (typically 5 bits)
-#define JTAG_IR_LEN 5u
+// RISC-V requires at least a 5-bit IR, but conforming TAPs may be wider. This
+// bit-banger cannot discover per-device IR lengths in an arbitrary JTAG chain,
+// so the width must be explicit for a wider single-TAP target.
+#ifndef PROBE_RISCV_JTAG_IR_LEN
+#define PROBE_RISCV_JTAG_IR_LEN 5u
+#endif
+#if PROBE_RISCV_JTAG_IR_LEN < 5 || PROBE_RISCV_JTAG_IR_LEN > 32
+#error "PROBE_RISCV_JTAG_IR_LEN must be in the supported range 5..32"
+#endif
+#define JTAG_IR_LEN PROBE_RISCV_JTAG_IR_LEN
+#define JTAG_IR_BYTES ((JTAG_IR_LEN + 7u) / 8u)
 
 // DMI parameters (read from DTMCS)
-static uint8_t g_dmi_abits = 7u;  // default, will be updated from DTMCS
+static uint8_t g_dmi_abits = 0u;
+static uint8_t g_dmi_idle  = 0u;  // Run-Test/Idle cycles between DMI scans
+static bool g_dmi_transport_valid = false;
 
 static inline void jtag_delay(void)
 {
@@ -73,6 +84,9 @@ static const jtag_state_t tap_next[16][2] = {
 
 void jtag_init(void)
 {
+    g_dmi_abits = 0;
+    g_dmi_idle = 0;
+    g_dmi_transport_valid = false;
     jtag_tck_write(0);
     jtag_tms_write(1);
     jtag_tdi_write(0);
@@ -210,26 +224,57 @@ uint32_t jtag_read_dr32(uint32_t bits)
 
 // --- RISC-V DTM Access ---
 
+static void jtag_select_dtm_ir(uint32_t instruction)
+{
+    uint8_t ir[JTAG_IR_BYTES];
+    for (uint32_t i = 0; i < JTAG_IR_BYTES; i++) {
+        ir[i] = (uint8_t)(instruction >> (i * 8u));
+    }
+    // For IR widths greater than 5, standardized DTM instructions are
+    // zero-extended in the most-significant bits.
+    jtag_write_ir(ir, JTAG_IR_LEN);
+}
+
 uint32_t jtag_read_idcode(void)
 {
-    uint8_t ir = JTAG_IR_IDCODE;
-    jtag_write_ir(&ir, JTAG_IR_LEN);
+    jtag_select_dtm_ir(JTAG_IR_IDCODE);
     return jtag_read_dr32(32);
 }
 
 uint32_t jtag_read_dtmcs(void)
 {
-    uint8_t ir = JTAG_IR_DTMCS;
-    jtag_write_ir(&ir, JTAG_IR_LEN);
+    jtag_select_dtm_ir(JTAG_IR_DTMCS);
     uint32_t dtmcs = jtag_read_dr32(32);
 
-    // Extract abits for DMI operations
+    // Only version 1 is the JTAG DTM used by Debug Spec 0.13/1.0. Version 0
+    // has incompatible 0.11 semantics, 15 is custom and other values are
+    // reserved. The fixed 64-bit scan buffers support at most 30 abits.
+    uint8_t version = (uint8_t)(dtmcs & 0x0Fu);
     g_dmi_abits = (uint8_t)((dtmcs >> 4) & 0x3Fu);
-    if (g_dmi_abits == 0) {
-        g_dmi_abits = 7;  // fallback default
-    }
+    g_dmi_transport_valid = version == 1u && g_dmi_abits > 0u &&
+                            g_dmi_abits <= 30u;
+
+    // Run-Test/Idle cycles the DTM asks the debugger to insert after every
+    // DMI scan (dtmcs.idle, bits [14:12]).
+    g_dmi_idle = (uint8_t)((dtmcs >> 12) & 0x7u);
 
     return dtmcs;
+}
+
+void jtag_dmi_reset(void)
+{
+    if (!g_dmi_transport_valid) return;
+
+    // Write dtmcs.dmireset (bit 16). DMI busy/failed status is sticky: the
+    // DTM ignores every operation until this is written.
+    jtag_select_dtm_ir(JTAG_IR_DTMCS);
+
+    uint32_t v = (1u << 16);
+    uint8_t buf[4];
+    for (int i = 0; i < 4; i++) {
+        buf[i] = (uint8_t)(v >> (i * 8));
+    }
+    jtag_write_dr(buf, 32);
 }
 
 // DMI register format:
@@ -243,19 +288,32 @@ uint32_t jtag_read_dtmcs(void)
 #define DMI_OP_WRITE 2u
 #define DMI_OP_MASK  3u
 
-static bool jtag_dmi_op(uint32_t addr, uint32_t data_in, uint8_t op, uint32_t *data_out)
+#define DMI_OP_RETRIES 8u
+
+static void jtag_dmi_idle_cycles(void)
+{
+    // Stay in Run-Test/Idle (TMS=0 keeps the TAP there) for the
+    // DTM-requested number of cycles.
+    for (uint8_t i = 0; i < g_dmi_idle; i++) {
+        jtag_tms(0);
+    }
+}
+
+// One request scan followed by one NOP scan. The value captured during a
+// scan is the result of the PREVIOUS operation, so the NOP scan is what
+// retrieves this operation's status (and read data). Returns the op status
+// field: 0=success, 2=failed, 3=busy.
+static uint8_t jtag_dmi_scan_pair(uint32_t addr, uint32_t data_in, uint8_t op,
+                                  uint32_t *data_out)
 {
     // Select DMI
-    uint8_t ir = JTAG_IR_DMI;
-    jtag_write_ir(&ir, JTAG_IR_LEN);
+    jtag_select_dtm_ir(JTAG_IR_DMI);
 
     // Build DMI request: [op:2][data:32][addr:abits]
-    // Total bits = 2 + 32 + abits
     uint32_t total_bits = 2u + 32u + g_dmi_abits;
     uint8_t tdi[8] = {0};
     uint8_t tdo[8] = {0};
 
-    // Pack: op in bits [1:0], data in bits [33:2], addr in bits [33+abits:34]
     uint64_t request = ((uint64_t)op & 3u) |
                        ((uint64_t)data_in << 2) |
                        ((uint64_t)addr << 34);
@@ -264,24 +322,19 @@ static bool jtag_dmi_op(uint32_t addr, uint32_t data_in, uint8_t op, uint32_t *d
         tdi[i] = (uint8_t)(request >> (i * 8));
     }
 
-    // Shift request, get response from previous operation
     jtag_shift_dr(tdi, tdo, total_bits);
     jtag_tms(1);  // Exit1-DR -> Update-DR
     jtag_tms(0);  // Update-DR -> Idle
+    jtag_dmi_idle_cycles();
 
-    // For read operations, we need a second shift to get the data
-    // (first shift sends request, second shift gets response)
-    if (op == DMI_OP_READ) {
-        // Send NOP to clock out the read response
-        request = DMI_OP_NOP;
-        for (int i = 0; i < 8; i++) {
-            tdi[i] = (uint8_t)(request >> (i * 8));
-        }
-
-        jtag_shift_dr(tdi, tdo, total_bits);
-        jtag_tms(1);
-        jtag_tms(0);
+    // NOP scan to collect the result of the request above
+    for (int i = 0; i < 8; i++) {
+        tdi[i] = 0;  // DMI_OP_NOP
     }
+    jtag_shift_dr(tdi, tdo, total_bits);
+    jtag_tms(1);
+    jtag_tms(0);
+    jtag_dmi_idle_cycles();
 
     // Parse response
     uint64_t response = 0;
@@ -289,19 +342,42 @@ static bool jtag_dmi_op(uint32_t addr, uint32_t data_in, uint8_t op, uint32_t *d
         response |= ((uint64_t)tdo[i]) << (i * 8);
     }
 
-    uint8_t resp_op = response & 3u;
-    uint32_t resp_data = (uint32_t)((response >> 2) & 0xFFFFFFFFu);
-
     if (data_out) {
-        *data_out = resp_data;
+        *data_out = (uint32_t)((response >> 2) & 0xFFFFFFFFu);
     }
+    return (uint8_t)(response & 3u);
+}
 
-    // op field: 0=success, 2=failed, 3=busy
-    return (resp_op == 0);
+static bool jtag_dmi_op(uint32_t addr, uint32_t data_in, uint8_t op, uint32_t *data_out)
+{
+    if (!g_dmi_transport_valid) return false;
+    if (g_dmi_abits < 32u && addr >= (1u << g_dmi_abits)) return false;
+
+    for (uint32_t attempt = 0; attempt < DMI_OP_RETRIES; attempt++) {
+        uint8_t resp = jtag_dmi_scan_pair(addr, data_in, op, data_out);
+        if (resp == 0u) {
+            return true;
+        }
+
+        // Busy (3) and failed (2) are sticky; recover the DTM either way.
+        jtag_dmi_reset();
+
+        if (resp != 3u) {
+            return false;  // real error, don't retry
+        }
+
+        // Busy: the scanned operation was discarded, so retrying is safe.
+        // Give the DM more breathing room from now on.
+        if (g_dmi_idle < 16u) {
+            g_dmi_idle++;
+        }
+    }
+    return false;
 }
 
 bool jtag_dmi_read(uint32_t addr, uint32_t *data)
 {
+    if (!data) return false;
     return jtag_dmi_op(addr, 0, DMI_OP_READ, data);
 }
 

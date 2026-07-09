@@ -57,3 +57,7 @@ bool riscv_watchpoints_supported(void);
 bool riscv_watchpoint_insert(target_watch_t type, uint32_t addr, uint32_t len);
 bool riscv_watchpoint_remove(target_watch_t type, uint32_t addr, uint32_t len);
 bool riscv_watchpoint_hit(target_watch_t *out_type, uint32_t *out_addr);
+
+// Disable every hardware trigger owned by this debug session. A slot remains
+// tracked if its hardware disable fails so cleanup can be retried safely.
+bool riscv_debug_resources_clear(void);
