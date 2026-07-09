@@ -14,6 +14,28 @@
 
 static bool g_link_up = false;
 
+bool probe_attach(void)
+{
+#if defined(PROBE_ENABLE_CORTEXM) && (PROBE_ENABLE_CORTEXM)
+    // Bring up SWD/ADIv5 for Cortex-M detection; RISC-V JTAG init happens
+    // inside target_init() as needed.
+    (void) adiv5_init();
+#endif
+
+    // target_init() handles architecture detection/fallback
+    // (tries SWD first if Cortex-M enabled, then JTAG if RISC-V enabled)
+    target_init();
+
+    g_link_up = target_attached() && target_halt();
+    if (!g_link_up) {
+        target_disconnect();
+        return false;
+    }
+
+    target_breakpoints_init();
+    return true;
+}
+
 bool probe_init(void)
 {
     rsp_init();
@@ -24,26 +46,7 @@ bool probe_init(void)
     nreset_write(1);
     delay_us(1000);
 
-#if defined(PROBE_ENABLE_CORTEXM) && (PROBE_ENABLE_CORTEXM)
-    // Try SWD/ADIv5 for Cortex-M targets
-    g_link_up = adiv5_init();
-#endif
-
-    // target_init() handles architecture detection/fallback
-    // (tries SWD first if Cortex-M enabled, then JTAG if RISC-V enabled)
-    target_init();
-
-    // Check if any target was detected
-    // For now, assume link is up if we get here (target_init sets internal state)
-#if !defined(PROBE_ENABLE_CORTEXM) || !(PROBE_ENABLE_CORTEXM)
-    g_link_up = true;  // RISC-V only: JTAG init happens in target_init
-#endif
-
-    if (g_link_up) {
-        (void) target_halt();
-        target_breakpoints_init();
-    }
-    return g_link_up;
+    return probe_attach();
 }
 
 void probe_poll(void)

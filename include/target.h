@@ -1,8 +1,7 @@
 #pragma once
 
-// Target abstraction layer for multi-architecture support.
-// Currently supports Cortex-M; RISC-V support can be added by implementing
-// the same interface in src/riscv.c and selecting via compile-time option.
+// Target abstraction layer for Cortex-M/SWD and RV32/RISC-V JTAG, with
+// compile-time selection and runtime detection when both are enabled.
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -17,6 +16,13 @@ typedef enum {
 // Initialize target detection and state. Call after SWD/JTAG link is up.
 void target_init(void);
 
+// Forget the currently selected target after a detach or failed attach.
+// The next session must call target_init() again before accessing it.
+void target_disconnect(void);
+
+// True once target_init() has detected an architecture.
+bool target_attached(void);
+
 // Execution control
 bool target_halt(void);
 bool target_continue(void);
@@ -29,6 +35,13 @@ bool target_is_halted(bool *halted);
 bool target_read_reg(uint32_t regnum, uint32_t *out);
 bool target_write_reg(uint32_t regnum, uint32_t val);
 
+// The core regnum holding the PC (15 for Cortex-M, 32 for RISC-V).
+uint32_t target_pc_regnum(void);
+
+// Map a GDB p/P packet register number onto the core numbering above.
+// Returns false for registers this architecture doesn't expose.
+bool target_map_gdb_regnum(uint32_t gdb_regno, uint32_t *core_regno);
+
 // GDB register block access (all GPRs + status in one call)
 // Returns number of 32-bit registers in the block.
 uint32_t target_gdb_reg_count(void);
@@ -37,6 +50,10 @@ bool target_write_gdb_regs(const uint32_t *regs, uint32_t count);
 
 // Breakpoints
 void target_breakpoints_init(void);
+// Disable all breakpoint/watchpoint resources owned by this debug session.
+// Software bookkeeping is retained when a hardware clear fails so callers
+// can retry instead of silently losing track of a live comparator.
+bool target_debug_resources_clear(void);
 bool target_breakpoint_insert(uint32_t addr);
 bool target_breakpoint_remove(uint32_t addr);
 

@@ -26,6 +26,12 @@ typedef enum {
 
 static target_arch_t g_target_arch = TARGET_ARCH_NONE;
 
+#if defined(PROBE_ENABLE_QXFER_TARGET_XML) && (PROBE_ENABLE_QXFER_TARGET_XML)
+#define TARGET_HAVE_XML 1
+#else
+#define TARGET_HAVE_XML 0
+#endif
+
 void target_init(void)
 {
     g_target_arch = TARGET_ARCH_NONE;
@@ -46,6 +52,66 @@ void target_init(void)
         return;
     }
 #endif
+}
+
+void target_disconnect(void)
+{
+    g_target_arch = TARGET_ARCH_NONE;
+}
+
+bool target_attached(void)
+{
+    return g_target_arch != TARGET_ARCH_NONE;
+}
+
+uint32_t target_pc_regnum(void)
+{
+    switch (g_target_arch) {
+#if HAVE_CORTEXM
+        case TARGET_ARCH_CORTEX_M:
+            return 15u;
+#endif
+#if HAVE_RISCV
+        case TARGET_ARCH_RISCV:
+            return 32u;
+#endif
+        default:
+            return 0u;
+    }
+}
+
+bool target_map_gdb_regnum(uint32_t gdb_regno, uint32_t *core_regno)
+{
+    switch (g_target_arch) {
+#if HAVE_CORTEXM
+        case TARGET_ARCH_CORTEX_M:
+            if (gdb_regno <= 15u) {
+                *core_regno = gdb_regno;
+                return true;
+            }
+            // XML descriptions number xPSR sequentially as remote register
+            // 16.  Register 25 is the historical no-XML ARM CPSR slot; keep
+            // accepting it for clients that issue legacy p/P packets.
+            if ((TARGET_HAVE_XML && gdb_regno == 16u) ||
+                gdb_regno == 25u) {
+                *core_regno = 16u;
+                return true;
+            }
+            return false;
+#endif
+#if HAVE_RISCV
+        case TARGET_ARCH_RISCV:
+            if (gdb_regno <= 32u) {
+                *core_regno = gdb_regno; // x0-x31, 32 = pc
+                return true;
+            }
+            return false;
+#endif
+        default:
+            (void) gdb_regno;
+            (void) core_regno;
+            return false;
+    }
 }
 
 bool target_halt(void)
@@ -149,8 +215,15 @@ uint32_t target_gdb_reg_count(void)
     switch (g_target_arch) {
 #if HAVE_CORTEXM
         case TARGET_ARCH_CORTEX_M:
-            // Cortex-M: r0-r15 (16) + xPSR (1) = 17 registers
+#if TARGET_HAVE_XML
+            // XML describes r0-r15 + xPSR as 17 consecutive registers.
             return 17u;
+#else
+            // Legacy ARM remote layout is 168 bytes: r0-r15, eight 96-bit
+            // FPA registers, FPS, and CPSR/xPSR.  Retain it when XML is
+            // explicitly disabled so stock GDB does not reject a short g.
+            return 42u;
+#endif
 #endif
 #if HAVE_RISCV
         case TARGET_ARCH_RISCV:
@@ -166,8 +239,20 @@ bool target_read_gdb_regs(uint32_t *regs, uint32_t max_count)
     switch (g_target_arch) {
 #if HAVE_CORTEXM
         case TARGET_ARCH_CORTEX_M:
+#if TARGET_HAVE_XML
             if (max_count < 17u) return false;
             return cortex_read_gdb_regs(regs);
+#else
+            if (max_count < 42u || !cortex_read_gdb_regs(regs)) return false;
+            {
+                uint32_t xpsr = regs[16];
+                for (uint32_t i = 16u; i < 41u; i++) {
+                    regs[i] = 0u; // unsupported legacy FPA/FPS slots
+                }
+                regs[41] = xpsr;
+            }
+            return true;
+#endif
 #endif
 #if HAVE_RISCV
         case TARGET_ARCH_RISCV: {
@@ -186,8 +271,16 @@ bool target_write_gdb_regs(const uint32_t *regs, uint32_t count)
     switch (g_target_arch) {
 #if HAVE_CORTEXM
         case TARGET_ARCH_CORTEX_M:
-            if (count < 17u) return false;
+#if TARGET_HAVE_XML
+            if (count != 17u) return false;
             return cortex_write_gdb_regs(regs);
+#else
+            if (count != 42u) return false;
+            for (uint32_t i = 0; i < 16u; i++) {
+                if (!cortex_write_core_reg(i, regs[i])) return false;
+            }
+            return cortex_write_core_reg(16u, regs[41]);
+#endif
 #endif
 #if HAVE_RISCV
         case TARGET_ARCH_RISCV:
@@ -213,6 +306,22 @@ void target_breakpoints_init(void)
 #endif
         default:
             break;
+    }
+}
+
+bool target_debug_resources_clear(void)
+{
+    switch (g_target_arch) {
+#if HAVE_CORTEXM
+        case TARGET_ARCH_CORTEX_M:
+            return cortex_debug_resources_clear();
+#endif
+#if HAVE_RISCV
+        case TARGET_ARCH_RISCV:
+            return riscv_debug_resources_clear();
+#endif
+        default:
+            return true;
     }
 }
 
@@ -327,6 +436,9 @@ bool target_watchpoint_hit(target_watch_t *out_type, uint32_t *out_addr)
 
 bool target_mem_read_bytes(uint32_t addr, uint8_t *buf, uint32_t len)
 {
+    if ((len != 0u && (!buf || addr > UINT32_MAX - (len - 1u)))) {
+        return false;
+    }
     switch (g_target_arch) {
 #if HAVE_CORTEXM
         case TARGET_ARCH_CORTEX_M: {
@@ -347,6 +459,9 @@ bool target_mem_read_bytes(uint32_t addr, uint8_t *buf, uint32_t len)
 
 bool target_mem_write_bytes(uint32_t addr, const uint8_t *buf, uint32_t len)
 {
+    if ((len != 0u && (!buf || addr > UINT32_MAX - (len - 1u)))) {
+        return false;
+    }
     switch (g_target_arch) {
 #if HAVE_CORTEXM
         case TARGET_ARCH_CORTEX_M: {
@@ -375,11 +490,10 @@ bool target_xml_get(const char **out_xml, uint32_t *out_len)
         case TARGET_ARCH_RISCV: {
             // RISC-V target XML (minimal for RV32)
             static const char riscv_xml[] =
-                "<?xml version=\"1.0\"?>"
-                "<!DOCTYPE target SYSTEM \"gdb-target.dtd\">"
-                "<target version=\"1.0\">"
+                "<target>"
                 "<architecture>riscv:rv32</architecture>"
                 "</target>";
+            if (!out_xml || !out_len) return false;
             *out_xml = riscv_xml;
             *out_len = sizeof(riscv_xml) - 1;
             return true;

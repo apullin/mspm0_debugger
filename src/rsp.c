@@ -7,8 +7,29 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "probe.h"
 #include "target.h"
 #include "hal.h"
+
+#if defined(PROBE_ENABLE_FLASH_MSPM0) && (PROBE_ENABLE_FLASH_MSPM0)
+#include "flash_mspm0.h"
+#define RSP_HAVE_FLASH 1
+#else
+#define RSP_HAVE_FLASH 0
+#endif
+
+#if (defined(PROBE_ENABLE_QXFER_TARGET_XML) && (PROBE_ENABLE_QXFER_TARGET_XML)) || \
+    (defined(PROBE_ENABLE_RISCV_MINIMAL_XML) && (PROBE_ENABLE_RISCV_MINIMAL_XML))
+#define RSP_HAVE_TARGET_XML 1
+#else
+#define RSP_HAVE_TARGET_XML 0
+#endif
+
+#if RSP_HAVE_TARGET_XML || RSP_HAVE_FLASH
+#define RSP_HAVE_QXFER 1
+#else
+#define RSP_HAVE_QXFER 0
+#endif
 
 #ifndef PROBE_TINY_RAM
 #define PROBE_TINY_RAM 0
@@ -30,20 +51,74 @@
 #endif
 #endif
 
-static uint8_t rsp_iobuf[RSP_IOBUF_SIZE];
+// Memory payloads and register blocks are handled by disjoint commands, so
+// overlay them. This is material on the 1 KB C1104 and keeps the correct
+// 168-byte legacy ARM layout compatible with the enforced stack reserve.
+#if (!defined(PROBE_ENABLE_QXFER_TARGET_XML) || !(PROBE_ENABLE_QXFER_TARGET_XML)) && \
+    defined(PROBE_ENABLE_CORTEXM) && (PROBE_ENABLE_CORTEXM)
+#define RSP_MAX_REGS 42u // Legacy ARM: 168-byte r/FPA/FPS/CPSR layout
+#elif defined(PROBE_ENABLE_RISCV) && (PROBE_ENABLE_RISCV)
+#define RSP_MAX_REGS 33u // RV32: x0-x31 + pc
+#else
+#define RSP_MAX_REGS 17u // Cortex-M: r0-r15 + xPSR
+#endif
+typedef union {
+    uint32_t regs[RSP_MAX_REGS];
+    uint8_t  iobuf[RSP_IOBUF_SIZE];
+} rsp_work_t;
+static rsp_work_t rsp_work;
+#define rsp_regs  (rsp_work.regs)
+#define rsp_iobuf (rsp_work.iobuf)
 
 typedef enum {
     RSP_IDLE = 0,
     RSP_IN_PKT,
     RSP_IN_CSUM1,
-    RSP_IN_CSUM2
+    RSP_IN_CSUM2,
+    RSP_DISCARD,      // oversized packet: consume until '#'
+    RSP_DISCARD_CS1,  // consume first checksum char
+    RSP_DISCARD_CS2   // consume second checksum char, then NACK
 } rsp_state_t;
 
 static rsp_state_t rsp_state = RSP_IDLE;
-static char        rsp_buf[RSP_MAX_PAYLOAD + 1u];
+// Shared receive/retransmit storage. A reply is generated only after its
+// request has been parsed, so reusing the packet buffer gives tiny builds
+// standards-compliant NACK retransmission without a second 256-byte buffer.
+static char        rsp_buf[RSP_MAX_PAYLOAD + 5u];
 static uint32_t    rsp_len     = 0;
 static uint8_t     rsp_sum     = 0;
 static uint8_t     rsp_rx_csum = 0;
+static bool        rsp_noack_mode = false;
+static bool        rsp_running = false;
+
+static uint32_t rsp_tx_len   = 0;
+static bool     rsp_tx_valid = false;
+
+static void rsp_tx_record_begin(void)
+{
+    rsp_tx_len   = 0;
+    rsp_tx_valid = true;
+}
+
+static void rsp_tx_byte(uint8_t c)
+{
+    uart_putc(c);
+    if (rsp_tx_len < (uint32_t) sizeof(rsp_buf)) {
+        rsp_buf[rsp_tx_len++] = (char) c;
+    } else {
+        rsp_tx_valid = false; // too long to replay
+    }
+}
+
+static void rsp_retransmit_last(void)
+{
+    if (!rsp_tx_valid) {
+        return;
+    }
+    for (uint32_t i = 0; i < rsp_tx_len; i++) {
+        uart_putc((uint8_t) rsp_buf[i]);
+    }
+}
 
 static uint8_t hex_nibble(char c)
 {
@@ -67,32 +142,31 @@ static char nibble_hex(uint8_t n)
 
 static void rsp_put_hex_u8(uint8_t v)
 {
-    uart_putc((uint8_t) nibble_hex(v >> 4));
-    uart_putc((uint8_t) nibble_hex(v));
-}
-
-static void rsp_put_hex_u32_le(uint32_t v)
-{
-    for (int i = 0; i < 4; i++) {
-        uint8_t b = (uint8_t) (v & 0xFF);
-        rsp_put_hex_u8(b);
-        v >>= 8;
-    }
+    rsp_tx_byte((uint8_t) nibble_hex(v >> 4));
+    rsp_tx_byte((uint8_t) nibble_hex(v));
 }
 
 static bool parse_u32_hex(const char *s, uint32_t *out)
 {
-    uint32_t v = 0;
-    if (!s || !*s) {
+    uint32_t v      = 0;
+    uint32_t digits = 0;
+    if (!s) {
         return false;
     }
     while (*s) {
         uint8_t n = hex_nibble(*s);
         if (n == 0xFF) {
-            break;
+            return false; // trailing garbage is an error, not end-of-number
+        }
+        if (digits >= 8u) {
+            return false; // wider than 32 bits would silently wrap
         }
         v = (v << 4) | n;
         s++;
+        digits++;
+    }
+    if (digits == 0) {
+        return false;
     }
     *out = v;
     return true;
@@ -100,9 +174,10 @@ static bool parse_u32_hex(const char *s, uint32_t *out)
 
 static bool parse_u32_hex_stop(const char *s, char stop, uint32_t *out, const char **endp)
 {
-    uint32_t    v = 0;
-    const char *p = s;
-    if (!p || !*p) {
+    uint32_t    v      = 0;
+    uint32_t    digits = 0;
+    const char *p      = s;
+    if (!p) {
         return false;
     }
     while (*p && *p != stop) {
@@ -110,10 +185,14 @@ static bool parse_u32_hex_stop(const char *s, char stop, uint32_t *out, const ch
         if (n == 0xFF) {
             return false;
         }
+        if (digits >= 8u) {
+            return false;
+        }
         v = (v << 4) | n;
         p++;
+        digits++;
     }
-    if (*p != stop) {
+    if (digits == 0 || *p != stop) {
         return false;
     }
     *out = v;
@@ -126,12 +205,13 @@ static bool parse_u32_hex_stop(const char *s, char stop, uint32_t *out, const ch
 static void rsp_send_packet_begin(uint8_t *sum)
 {
     *sum = 0;
-    uart_putc('$');
+    rsp_tx_record_begin();
+    rsp_tx_byte('$');
 }
 
 static void rsp_send_packet_end(uint8_t sum)
 {
-    uart_putc('#');
+    rsp_tx_byte('#');
     rsp_put_hex_u8(sum);
 }
 
@@ -142,35 +222,44 @@ static void rsp_send_packet_str(const char *payload)
     while (*payload) {
         uint8_t c = (uint8_t) *payload++;
         sum       = (uint8_t) (sum + c);
-        uart_putc(c);
+        rsp_tx_byte(c);
     }
     rsp_send_packet_end(sum);
 }
 
-static void rsp_send_packet_bytes(const char *payload, uint32_t len)
-{
-    uint8_t sum;
-    rsp_send_packet_begin(&sum);
-    for (uint32_t i = 0; i < len; i++) {
-        uint8_t c = (uint8_t) payload[i];
-        sum       = (uint8_t) (sum + c);
-        uart_putc(c);
-    }
-    rsp_send_packet_end(sum);
-}
-
+#if RSP_HAVE_QXFER
 static void rsp_send_packet_prefix_and_bytes(char prefix, const char *payload, uint32_t len)
 {
     uint8_t sum;
     rsp_send_packet_begin(&sum);
     sum = (uint8_t) (sum + (uint8_t) prefix);
-    uart_putc((uint8_t) prefix);
+    rsp_tx_byte((uint8_t) prefix);
     for (uint32_t i = 0; i < len; i++) {
         uint8_t c = (uint8_t) payload[i];
         sum       = (uint8_t) (sum + c);
-        uart_putc(c);
+        rsp_tx_byte(c);
     }
     rsp_send_packet_end(sum);
+}
+#endif
+
+// Decode RSP binary escaping (0x7d followed by char^0x20) in place.
+// A final escape byte is malformed rather than a literal 0x7d.
+static bool rsp_unescape(char *buf, uint32_t len, uint32_t *decoded_len)
+{
+    uint32_t r = 0, w = 0;
+    while (r < len) {
+        uint8_t c = (uint8_t) buf[r++];
+        if (c == 0x7Du) {
+            if (r >= len) {
+                return false;
+            }
+            c = (uint8_t) ((uint8_t) buf[r++] ^ 0x20u);
+        }
+        buf[w++] = (char) c;
+    }
+    *decoded_len = w;
+    return true;
 }
 
 static void rsp_send_ok(void) { rsp_send_packet_str("OK"); }
@@ -181,6 +270,12 @@ static void rsp_send_sigtrap(void)
 {
     // SIGTRAP is 5
     rsp_send_packet_str("S05");
+}
+
+static void rsp_send_sigint(void)
+{
+    // SIGINT is 2 (stop reply for a Ctrl-C interrupt)
+    rsp_send_packet_str("S02");
 }
 
 static void rsp_send_trap_watchpoint(target_watch_t wt, uint32_t addr)
@@ -199,34 +294,39 @@ static void rsp_send_trap_watchpoint(target_watch_t wt, uint32_t addr)
     while (*p) {
         uint8_t c = (uint8_t) *p++;
         sum       = (uint8_t) (sum + c);
-        uart_putc(c);
+        rsp_tx_byte(c);
     }
 
     while (*tag) {
         uint8_t c = (uint8_t) *tag++;
         sum       = (uint8_t) (sum + c);
-        uart_putc(c);
+        rsp_tx_byte(c);
     }
     sum = (uint8_t) (sum + (uint8_t) ':');
-    uart_putc((uint8_t) ':');
+    rsp_tx_byte((uint8_t) ':');
 
     for (int i = 7; i >= 0; i--) {
         char c = nibble_hex((addr >> (4u * (uint32_t) i)) & 0xFu);
         sum    = (uint8_t) (sum + (uint8_t) c);
-        uart_putc((uint8_t) c);
+        rsp_tx_byte((uint8_t) c);
     }
 
     sum = (uint8_t) (sum + (uint8_t) ';');
-    uart_putc((uint8_t) ';');
+    rsp_tx_byte((uint8_t) ';');
 
     rsp_send_packet_end(sum);
 }
 
 static bool rsp_parse_hex_byte(const char *p, uint8_t *out)
 {
+    // Validate p[0] before touching p[1]: if p[0] is the terminating NUL,
+    // p[1] is out of bounds.
     uint8_t hi = hex_nibble(p[0]);
+    if (hi == 0xFF) {
+        return false;
+    }
     uint8_t lo = hex_nibble(p[1]);
-    if (hi == 0xFF || lo == 0xFF) {
+    if (lo == 0xFF) {
         return false;
     }
     *out = (uint8_t) ((hi << 4) | lo);
@@ -242,7 +342,7 @@ static bool rsp_hex_to_bytes(const char *hex, uint8_t *out, uint32_t outlen)
         }
         out[i] = b;
     }
-    return true;
+    return hex[2u * outlen] == '\0';
 }
 
 static void rsp_send_bytes_as_hex(const uint8_t *data, uint32_t len)
@@ -254,59 +354,87 @@ static void rsp_send_bytes_as_hex(const uint8_t *data, uint32_t len)
         char    h1 = nibble_hex(b >> 4);
         char    h2 = nibble_hex(b);
         sum        = (uint8_t) (sum + (uint8_t) h1);
-        uart_putc((uint8_t) h1);
+        rsp_tx_byte((uint8_t) h1);
         sum = (uint8_t) (sum + (uint8_t) h2);
-        uart_putc((uint8_t) h2);
+        rsp_tx_byte((uint8_t) h2);
     }
     rsp_send_packet_end(sum);
 }
 
-static void rsp_send_regs_hex(const uint32_t regs[17])
+static void rsp_send_regs_hex(const uint32_t *regs, uint32_t count)
 {
     uint8_t sum;
     rsp_send_packet_begin(&sum);
-    for (int i = 0; i < 17; i++) {
+    for (uint32_t i = 0; i < count; i++) {
         uint32_t v = regs[i];
         for (int j = 0; j < 4; j++) {
             uint8_t b  = (uint8_t) (v & 0xFF);
             char    h1 = nibble_hex(b >> 4);
             char    h2 = nibble_hex(b);
             sum        = (uint8_t) (sum + (uint8_t) h1);
-            uart_putc((uint8_t) h1);
+            rsp_tx_byte((uint8_t) h1);
             sum = (uint8_t) (sum + (uint8_t) h2);
-            uart_putc((uint8_t) h2);
+            rsp_tx_byte((uint8_t) h2);
             v >>= 8;
         }
     }
     rsp_send_packet_end(sum);
 }
 
-static bool rsp_parse_regs_hex(const char *hex, uint32_t regs[17])
+static bool rsp_parse_regs_hex(const char *hex, uint32_t *regs, uint32_t count)
 {
-    for (int i = 0; i < 17; i++) {
+    for (uint32_t i = 0; i < count; i++) {
         uint32_t v = 0;
-        for (int j = 0; j < 4; j++) {
+        for (uint32_t j = 0; j < 4; j++) {
             uint8_t b;
-            if (!rsp_parse_hex_byte(hex + (i * 8 + j * 2), &b)) {
+            if (!rsp_parse_hex_byte(hex + (i * 8u + j * 2u), &b)) {
                 return false;
             }
             v |= ((uint32_t) b << (8u * j));
         }
         regs[i] = v;
     }
-    return true;
+    return hex[8u * count] == '\0';
 }
+
+#if defined(PROBE_ENABLE_QXFER_TARGET_XML) && (PROBE_ENABLE_QXFER_TARGET_XML)
+#define QS_XML ";qXfer:features:read+"
+#else
+#define QS_XML ""
+#endif
+#if RSP_HAVE_FLASH
+#define QS_MAP ";qXfer:memory-map:read+"
+#else
+#define QS_MAP ""
+#endif
 
 static void handle_qSupported(void)
 {
-#if defined(PROBE_ENABLE_QXFER_TARGET_XML) && (PROBE_ENABLE_QXFER_TARGET_XML)
-    rsp_send_packet_str("PacketSize=" RSP_PACKET_SIZE_HEX ";swbreak+;hwbreak+;qXfer:features:read+");
-#else
-    rsp_send_packet_str("PacketSize=" RSP_PACKET_SIZE_HEX ";swbreak+;hwbreak+");
+    // qSupported marks the start of a GDB session: acks are back on until
+    // the new session requests otherwise, and if no target was found at
+    // boot (e.g. it was unpowered), re-run detection now.  Always probing at
+    // this session boundary also recovers from a target power-cycle or swap;
+    // target_attached() alone only reflects cached software state.
+    rsp_noack_mode = false;
+    rsp_running = false;
+#if RSP_HAVE_FLASH
+    flash_mspm0_abort();
 #endif
-}
+    (void) probe_attach();
 
-static bool rsp_running = false;
+#if defined(PROBE_ENABLE_RISCV_MINIMAL_XML) && (PROBE_ENABLE_RISCV_MINIMAL_XML)
+    const char *xml = NULL;
+    uint32_t xml_len = 0u;
+    if (target_xml_get(&xml, &xml_len) && xml && xml_len != 0u) {
+        rsp_send_packet_str("PacketSize=" RSP_PACKET_SIZE_HEX
+                            ";QStartNoAckMode+"
+                            ";qXfer:features:read+" QS_MAP);
+        return;
+    }
+#endif
+    rsp_send_packet_str("PacketSize=" RSP_PACKET_SIZE_HEX
+                        ";QStartNoAckMode+" QS_XML QS_MAP);
+}
 
 static bool parse_u32_le_hex_bytes(const char *hex, uint32_t *out)
 {
@@ -317,6 +445,9 @@ static bool parse_u32_le_hex_bytes(const char *hex, uint32_t *out)
             return false;
         }
         v |= ((uint32_t) b << (8u * (uint32_t) i));
+    }
+    if (hex[8] != '\0') {
+        return false;
     }
     *out = v;
     return true;
@@ -331,9 +462,9 @@ static void rsp_send_u32_le(uint32_t v)
         char    h1 = nibble_hex(b >> 4);
         char    h2 = nibble_hex(b);
         sum        = (uint8_t) (sum + (uint8_t) h1);
-        uart_putc((uint8_t) h1);
+        rsp_tx_byte((uint8_t) h1);
         sum = (uint8_t) (sum + (uint8_t) h2);
-        uart_putc((uint8_t) h2);
+        rsp_tx_byte((uint8_t) h2);
         v >>= 8;
     }
     rsp_send_packet_end(sum);
@@ -396,7 +527,36 @@ static void handle_breakpoint(const char *p)
     rsp_send_empty();
 }
 
-#if defined(PROBE_ENABLE_QXFER_TARGET_XML) && (PROBE_ENABLE_QXFER_TARGET_XML)
+#if RSP_HAVE_QXFER
+// Serve one OFFSET,LENGTH chunk of a qXfer document ('m' = more, 'l' = last).
+static void rsp_send_xfer_chunk(const char *doc, uint32_t doc_len, const char *args)
+{
+    uint32_t    off = 0, len = 0;
+    const char *r = NULL;
+    if (!parse_u32_hex_stop(args, ',', &off, &r) || !parse_u32_hex(r, &len)) {
+        rsp_send_err();
+        return;
+    }
+
+    if (off >= doc_len) {
+        rsp_send_packet_str("l");
+        return;
+    }
+
+    uint32_t remaining = doc_len - off;
+    if (len > remaining) {
+        len = remaining;
+    }
+    if (len > (RSP_MAX_PAYLOAD - 1u)) {
+        len = (RSP_MAX_PAYLOAD - 1u);
+    }
+
+    char more = ((off + len) < doc_len) ? 'm' : 'l';
+    rsp_send_packet_prefix_and_bytes(more, doc + off, len);
+}
+#endif
+
+#if RSP_HAVE_TARGET_XML
 static void handle_qXfer_features_read(const char *p)
 {
     // qXfer:features:read:target.xml:OFFSET,LENGTH
@@ -408,19 +568,9 @@ static void handle_qXfer_features_read(const char *p)
     }
 
     size_t annex_len = (size_t) (q - annex);
-    if (annex_len != 9u || strncmp(annex, "target.xml", annex_len) != 0) {
+    if (annex_len != (sizeof("target.xml") - 1u) ||
+        strncmp(annex, "target.xml", annex_len) != 0) {
         rsp_send_empty();
-        return;
-    }
-
-    uint32_t    off = 0, len = 0;
-    const char *r = NULL;
-    if (!parse_u32_hex_stop(q + 1, ',', &off, &r)) {
-        rsp_send_err();
-        return;
-    }
-    if (!parse_u32_hex(r, &len)) {
-        rsp_send_err();
         return;
     }
 
@@ -431,21 +581,57 @@ static void handle_qXfer_features_read(const char *p)
         return;
     }
 
-    if (off >= xml_len) {
-        rsp_send_packet_str("l");
-        return;
+    rsp_send_xfer_chunk(xml, xml_len, q + 1);
+}
+#endif
+
+#if RSP_HAVE_FLASH
+// GDB memory map for an MSPM0 target: main flash geometry is read from the
+// target's FLASHCTL, so `load` uses vFlash* for flash regions. Regions
+// outside the map default to RAM behavior, but list the SRAM/peripheral
+// spaces anyway for GDB configurations with inaccessible-by-default set.
+static char     rsp_mmap_xml[320];
+static uint32_t rsp_mmap_len = 0;
+
+static void mmap_append(const char *s)
+{
+    while (*s && rsp_mmap_len < (uint32_t) sizeof(rsp_mmap_xml) - 1u) {
+        rsp_mmap_xml[rsp_mmap_len++] = *s++;
+    }
+}
+
+static void mmap_append_hex(uint32_t v)
+{
+    bool started = false;
+    for (int i = 7; i >= 0; i--) {
+        uint8_t nib = (uint8_t) ((v >> (4u * (uint32_t) i)) & 0xFu);
+        if (nib != 0 || started || i == 0) {
+            started = true;
+            if (rsp_mmap_len < (uint32_t) sizeof(rsp_mmap_xml) - 1u) {
+                rsp_mmap_xml[rsp_mmap_len++] = nibble_hex(nib);
+            }
+        }
+    }
+}
+
+static bool rsp_mmap_build(void)
+{
+    uint32_t fsize = 0, ssize = 0;
+    if (!flash_mspm0_geometry(&fsize, &ssize)) {
+        return false; // not an MSPM0 FLASHCTL: no map, GDB proceeds without
     }
 
-    uint32_t remaining = xml_len - off;
-    if (len > remaining) {
-        len = remaining;
-    }
-    if (len > (RSP_MAX_PAYLOAD - 1u)) {
-        len = (RSP_MAX_PAYLOAD - 1u);
-    }
-
-    char more = ((off + len) < xml_len) ? 'm' : 'l';
-    rsp_send_packet_prefix_and_bytes(more, xml + off, len);
+    rsp_mmap_len = 0;
+    mmap_append("<memory-map>"
+                "<memory type=\"flash\" start=\"0x0\" length=\"0x");
+    mmap_append_hex(fsize);
+    mmap_append("\"><property name=\"blocksize\">0x");
+    mmap_append_hex(ssize);
+    mmap_append("</property></memory>"
+                "<memory type=\"ram\" start=\"0x20000000\" length=\"0x8000000\"/>"
+                "<memory type=\"ram\" start=\"0x40000000\" length=\"0xc0000000\"/>"
+                "</memory-map>");
+    return true;
 }
 #endif
 
@@ -455,35 +641,60 @@ static void rsp_handle_command(void)
     const char *p    = rsp_buf;
 
     if (p[0] == '?' && p[1] == '\0') {
+        bool halted = false;
+        if (!target_attached() || !target_is_halted(&halted)) {
+            if (!probe_attach() || !target_is_halted(&halted)) {
+                rsp_send_err();
+                return;
+            }
+        }
+        if (!halted && !target_halt()) {
+            rsp_send_err();
+            return;
+        }
+        // '?' is a synchronous stop query.  Once a stop is confirmed there
+        // is no longer an outstanding continue whose completion rsp_poll()
+        // should report a second time.
+        rsp_running = false;
         rsp_send_sigtrap();
         return;
     }
 
     if (p[0] == 'g' && p[1] == '\0') {
-        uint32_t regs[17];
+        uint32_t count = target_gdb_reg_count();
+        if (count == 0u || count > RSP_MAX_REGS) {
+            rsp_send_err();
+            return;
+        }
         if (!target_halt()) {
             rsp_send_err();
             return;
         }
-        if (!target_read_gdb_regs(regs, 17)) {
+        rsp_running = false;
+        if (!target_read_gdb_regs(rsp_regs, count)) {
             rsp_send_err();
             return;
         }
-        rsp_send_regs_hex(regs);
+        rsp_send_regs_hex(rsp_regs, count);
         return;
     }
 
     if (p[0] == 'G') {
-        uint32_t regs[17];
+        uint32_t count = target_gdb_reg_count();
+        if (count == 0u || count > RSP_MAX_REGS) {
+            rsp_send_err();
+            return;
+        }
         if (!target_halt()) {
             rsp_send_err();
             return;
         }
-        if (!rsp_parse_regs_hex(p + 1, regs)) {
+        rsp_running = false;
+        if (!rsp_parse_regs_hex(p + 1, rsp_regs, count)) {
             rsp_send_err();
             return;
         }
-        if (!target_write_gdb_regs(regs, 17)) {
+        if (!target_write_gdb_regs(rsp_regs, count)) {
             rsp_send_err();
             return;
         }
@@ -544,6 +755,41 @@ static void rsp_handle_command(void)
         return;
     }
 
+    if (p[0] == 'X') {
+        // Xaddr,len:binary-data (0x7d-escaped). GDB probes support with a
+        // zero-length write; replying OK enables binary downloads.
+        uint32_t    addr = 0, len = 0;
+        const char *q = NULL, *r = NULL;
+        if (!parse_u32_hex_stop(p + 1, ',', &addr, &q) ||
+            !parse_u32_hex_stop(q, ':', &len, &r)) {
+            rsp_send_err();
+            return;
+        }
+
+        char    *data = rsp_buf + (r - p);
+        uint32_t raw  = rsp_len - (uint32_t) (r - p);
+        uint32_t n = 0u;
+        if (!rsp_unescape(data, raw, &n)) {
+            rsp_send_err();
+            return;
+        }
+
+        if (n != len) {
+            rsp_send_err();
+            return;
+        }
+        if (len == 0u) {
+            rsp_send_ok();
+            return;
+        }
+        if (!target_mem_write_bytes(addr, (const uint8_t *) data, len)) {
+            rsp_send_err();
+            return;
+        }
+        rsp_send_ok();
+        return;
+    }
+
 #if 0
     /*
      * Reference (pre tiny-RAM experiment):
@@ -563,15 +809,22 @@ static void rsp_handle_command(void)
                 rsp_send_err();
                 return;
             }
-            if (!target_write_reg(15, addr)) {
+            if (!target_write_reg(target_pc_regnum(), addr)) {
                 rsp_send_err();
                 return;
             }
         }
 
         if (!target_continue()) {
-            rsp_send_err();
-            return;
+            // Resume transports are posted/acknowledged asynchronously. A
+            // false result can therefore mean "request applied, confirmation
+            // failed". Only report E01 when the target is confirmed halted;
+            // otherwise keep tracking the possibly running target.
+            bool halted = false;
+            if (target_is_halted(&halted) && halted) {
+                rsp_send_err();
+                return;
+            }
         }
         rsp_running = true;
         return;
@@ -585,7 +838,7 @@ static void rsp_handle_command(void)
                 rsp_send_err();
                 return;
             }
-            if (!target_write_reg(15, addr)) {
+            if (!target_write_reg(target_pc_regnum(), addr)) {
                 rsp_send_err();
                 return;
             }
@@ -595,6 +848,7 @@ static void rsp_handle_command(void)
             rsp_send_err();
             return;
         }
+        rsp_running = false;
         rsp_send_sigtrap();
         return;
     }
@@ -606,26 +860,24 @@ static void rsp_handle_command(void)
             return;
         }
 
+        uint32_t core_reg = 0;
+        if (!target_map_gdb_regnum(regno, &core_reg)) {
+            rsp_send_empty(); // register not exposed by this architecture
+            return;
+        }
+
         if (!target_halt()) {
             rsp_send_err();
             return;
         }
+        rsp_running = false;
 
         uint32_t val = 0;
-        uint32_t core_reg = regno;
-        if (regno == 25) {
-            core_reg = 16; // CPSR -> xPSR alias for M-profile
-        }
-        if (core_reg <= 16) {
-            if (!target_read_reg(core_reg, &val)) {
-                rsp_send_err();
-                return;
-            }
-            rsp_send_u32_le(val);
+        if (!target_read_reg(core_reg, &val)) {
+            rsp_send_err();
             return;
         }
-
-        rsp_send_empty();
+        rsp_send_u32_le(val);
         return;
     }
 
@@ -643,41 +895,124 @@ static void rsp_handle_command(void)
             return;
         }
 
+        uint32_t core_reg = 0;
+        if (!target_map_gdb_regnum(regno, &core_reg)) {
+            rsp_send_empty();
+            return;
+        }
+
         if (!target_halt()) {
             rsp_send_err();
             return;
         }
+        rsp_running = false;
 
-        uint32_t core_reg = regno;
-        if (regno == 25) {
-            core_reg = 16;
-        }
-        if (core_reg <= 16) {
-            if (!target_write_reg(core_reg, val)) {
-                rsp_send_err();
-                return;
-            }
-            rsp_send_ok();
+        if (!target_write_reg(core_reg, val)) {
+            rsp_send_err();
             return;
         }
-
-        rsp_send_empty();
+        rsp_send_ok();
         return;
     }
 
-#if defined(PROBE_ENABLE_QXFER_TARGET_XML) && (PROBE_ENABLE_QXFER_TARGET_XML)
+#if RSP_HAVE_TARGET_XML
     if (strncmp(p, "qXfer:features:read:", (sizeof("qXfer:features:read:") - 1u)) == 0) {
         handle_qXfer_features_read(p);
         return;
     }
 #endif
 
-    if (strncmp(p, "qSupported", 10) == 0) {
+#if RSP_HAVE_FLASH
+    if (strncmp(p, "qXfer:memory-map:read::", (sizeof("qXfer:memory-map:read::") - 1u)) == 0) {
+        if (!rsp_mmap_build()) {
+            rsp_send_empty();
+            return;
+        }
+        rsp_send_xfer_chunk(rsp_mmap_xml, rsp_mmap_len,
+                            p + (sizeof("qXfer:memory-map:read::") - 1u));
+        return;
+    }
+
+    if (strncmp(p, "vFlashErase:", 12) == 0) {
+        uint32_t    addr = 0, len = 0;
+        const char *q = NULL;
+        if (!parse_u32_hex_stop(p + 12, ',', &addr, &q) || !parse_u32_hex(q, &len)) {
+            flash_mspm0_abort();
+            rsp_send_err();
+            return;
+        }
+        if (!target_halt()) {
+            flash_mspm0_abort();
+            rsp_send_err();
+            return;
+        }
+        rsp_running = false;
+        if (!flash_mspm0_erase_range(addr, len)) {
+            flash_mspm0_abort();
+            rsp_send_err();
+            return;
+        }
+        rsp_send_ok();
+        return;
+    }
+
+    if (strncmp(p, "vFlashWrite:", 12) == 0) {
+        // vFlashWrite:addr:binary-data (0x7d-escaped)
+        uint32_t    addr = 0;
+        const char *r = NULL;
+        if (!parse_u32_hex_stop(p + 12, ':', &addr, &r)) {
+            flash_mspm0_abort();
+            rsp_send_err();
+            return;
+        }
+        char    *data = rsp_buf + (r - p);
+        uint32_t raw  = rsp_len - (uint32_t) (r - p);
+        uint32_t n = 0u;
+        if (!rsp_unescape(data, raw, &n)) {
+            flash_mspm0_abort();
+            rsp_send_err();
+            return;
+        }
+        if (!target_halt()) {
+            flash_mspm0_abort();
+            rsp_send_err();
+            return;
+        }
+        rsp_running = false;
+        if (!flash_mspm0_write(addr, (const uint8_t *) data, n)) {
+            flash_mspm0_abort();
+            rsp_send_err();
+            return;
+        }
+        rsp_send_ok();
+        return;
+    }
+
+    if (strcmp(p, "vFlashDone") == 0) {
+        if (!flash_mspm0_done()) {
+            flash_mspm0_abort();
+            rsp_send_err();
+            return;
+        }
+        rsp_send_ok();
+        return;
+    }
+#endif
+
+    if (strncmp(p, "qSupported", 10) == 0 &&
+        (p[10] == '\0' || p[10] == ':')) {
         handle_qSupported();
         return;
     }
 
-    if (strncmp(p, "qAttached", 9) == 0) {
+    if (strcmp(p, "QStartNoAckMode") == 0) {
+        rsp_send_ok();
+        rsp_noack_mode = true; // takes effect for subsequent packets
+        return;
+    }
+
+    if (strncmp(p, "qAttached", 9) == 0 &&
+        (p[9] == '\0' || p[9] == ':')) {
         rsp_send_packet_str("1");
         return;
     }
@@ -689,7 +1024,30 @@ static void rsp_handle_command(void)
 
     if (p[0] == 'D' || p[0] == 'k') {
         rsp_running = false;
-        (void) target_continue();
+#if RSP_HAVE_FLASH
+        flash_mspm0_abort();
+#endif
+        if (!target_debug_resources_clear()) {
+            rsp_send_err();
+            return;
+        }
+        if (!target_continue()) {
+            bool halted = false;
+            if (!target_is_halted(&halted)) {
+                // Detach did not complete and run state is unknown. Retain the
+                // attachment and polling so a later observed stop is reported.
+                rsp_running = true;
+                rsp_send_err();
+                return;
+            }
+            if (halted) {
+                rsp_send_err();
+                return;
+            }
+            // Confirmed running is the requested detach outcome even if the
+            // driver's final resume cleanup/acknowledgment failed.
+        }
+        target_disconnect();
         rsp_send_ok();
         return;
     }
@@ -703,28 +1061,40 @@ void rsp_init(void)
     rsp_len    = 0;
     rsp_sum    = 0;
     rsp_rx_csum = 0;
+    rsp_tx_len = 0;
+    rsp_tx_valid = false;
     rsp_running = false;
+    rsp_noack_mode = false;
+#if RSP_HAVE_FLASH
+    flash_mspm0_abort();
+#endif
 }
 
 void rsp_process_byte(uint8_t c)
 {
-    // Ctrl-C (0x03) is out-of-band interrupt
-    if (c == 0x03) {
-        rsp_running = false;
-        (void) target_halt();
-        rsp_send_sigtrap();
-        rsp_state = RSP_IDLE;
-        rsp_len   = 0;
-        return;
-    }
-
     switch (rsp_state) {
     case RSP_IDLE:
         if (c == '$') {
             rsp_state = RSP_IN_PKT;
             rsp_len   = 0;
             rsp_sum   = 0;
+            rsp_tx_valid = false;
+        } else if (c == 0x03) {
+            // Ctrl-C interrupt. Only recognized between packets: GDB sends
+            // it as a lone byte, and 0x03 inside a packet body (e.g. binary
+            // X data) is payload, not an interrupt.
+            if (target_halt()) {
+                rsp_running = false;
+                rsp_send_sigint();
+            }
+            // On halt failure send nothing: a timeout at the GDB end is
+            // more truthful than claiming a stop that didn't happen.
+        } else if (c == '-' && !rsp_noack_mode) {
+            // GDB rejected our last packet (checksum error on its side):
+            // the spec requires retransmission.
+            rsp_retransmit_last();
         }
+        // '+' acks and line noise are ignored.
         break;
 
     case RSP_IN_PKT:
@@ -735,16 +1105,39 @@ void rsp_process_byte(uint8_t c)
                 rsp_buf[rsp_len++] = (char) c;
                 rsp_sum            = (uint8_t) (rsp_sum + c);
             } else {
-                rsp_state = RSP_IDLE;
+                // Oversized packet: swallow the rest, then NACK it so the
+                // sender fails fast instead of waiting for a timeout.
+                rsp_state = RSP_DISCARD;
                 rsp_len   = 0;
             }
         }
         break;
 
+    case RSP_DISCARD:
+        if (c == '#') {
+            rsp_state = RSP_DISCARD_CS1;
+        }
+        break;
+
+    case RSP_DISCARD_CS1:
+        rsp_state = RSP_DISCARD_CS2;
+        break;
+
+    case RSP_DISCARD_CS2:
+        if (!rsp_noack_mode) {
+            uart_putc('-');
+        }
+        rsp_state = RSP_IDLE;
+        break;
+
     case RSP_IN_CSUM1: {
         uint8_t hi = hex_nibble((char) c);
         if (hi == 0xFF) {
+            if (!rsp_noack_mode) {
+                uart_putc('-');
+            }
             rsp_state = RSP_IDLE;
+            rsp_len   = 0u;
             break;
         }
         rsp_rx_csum = (uint8_t) (hi << 4);
@@ -755,17 +1148,25 @@ void rsp_process_byte(uint8_t c)
     case RSP_IN_CSUM2: {
         uint8_t lo = hex_nibble((char) c);
         if (lo == 0xFF) {
+            if (!rsp_noack_mode) {
+                uart_putc('-');
+            }
             rsp_state = RSP_IDLE;
+            rsp_len   = 0u;
             break;
         }
         rsp_rx_csum |= lo;
 
         if (rsp_rx_csum == rsp_sum) {
-            uart_putc('+');
+            if (!rsp_noack_mode) {
+                uart_putc('+');
+            }
             rsp_handle_command();
-        } else {
+        } else if (!rsp_noack_mode) {
             uart_putc('-');
         }
+        // In no-ack mode a corrupted packet is silently dropped; the
+        // transport is assumed reliable, so this should not happen.
 
         rsp_state = RSP_IDLE;
         rsp_len   = 0;
