@@ -20,7 +20,7 @@
 
 **Why**: Every variant had at least one blocker; fixing them pre-PCB avoids debugging spec violations with a logic analyzer during bring-up.
 
-**Technical notes**: Measured wins: C1104 SRAM statics 920→560 B (CM), 664 B (dual) — stack headroom went from 56–104 B to 360–464 B, and the worst frame shrank 128→72 B (register buffer moved off-stack). Flash: C1104 dual 12.4 KB/16 KB. Pin gotchas discovered via SDK device headers: C110x has **no PA3** (C1104 TDI/TDO now PA4/PINCM5 + PA6/PINCM7); on C1105 PA3/PA4 ARE the HFXT pins (PINCM6/7) so JTAG+HFXT is now a #error; G5187 PA3/PA4 = PINCM8/9 (double as unused LFXT). MSPM0 PINCM mapping is per-device — trust `IOMUX_PINCMn_PF_GPIOA_DIOxx` in the device header, not PA_n+1.
+**Technical notes**: Measured wins: C1104 SRAM statics 920→560 B (CM), 664 B (dual) — stack headroom went from 56–104 B to 360–464 B, and the worst frame shrank 128→72 B (register buffer moved off-stack). Flash: C1104 dual 12.4 KB/16 KB. Pin gotchas discovered via SDK device headers: C110x has **no PA3** (C1104 TDI/TDO now PA4/PINCM5 + PA6/PINCM7); on C1105 PA3/PA4 ARE the HFXT pins (PINCM6/7) so JTAG+HFXT is now a #error; the original G5187 JTAG placeholder used PA3/PA4 = PINCM8/9 (double as unused LFXT) and was superseded by the LaunchPad mapping below. MSPM0 PINCM mapping is per-device — trust `IOMUX_PINCMn_PF_GPIOA_DIOxx` in the device header, not PA_n+1.
 
 ## 2026-07-08 PLANNING Second-pass improvement list
 
@@ -69,10 +69,26 @@ tightest GCC 12.2.1 image is now C1104 dual at 15,136 B flash and 680 B static
 SRAM, leaving 1,248 B; the linker assertion and CI build remain mandatory
 release gates.
 
-**Residual hardware gate**: PA0/PA1 remain bring-up-only ODIO placeholders for
-shared SWCLK/TCK and SWDIO/TMS. CMake rejects the mapping unless explicitly
-acknowledged; the schematic must move both signals to suitable push-pull pins
-before production.
+**Residual hardware gate**: C1104/C1105 PA0/PA1 remain bring-up-only ODIO
+placeholders for shared SWCLK/TCK and SWDIO/TMS. CMake rejects those mappings
+unless explicitly acknowledged; the C110x schematic must move both signals to
+suitable push-pull pins before production.
+
+## 2026-07-12 FIX G5187 LaunchPad pin mapping and GPIO startup safety
+
+**What**: Replaced the G5187 PA0/PA1/PA2 placeholders with accessible,
+push-pull-capable LaunchPad header pins: PB22/BP6 SWCLK, PB25/BP8 SWDIO, and
+PB2/BP4 target nRESET. Optional JTAG uses PA28/BP36 TDI and PB1/BP37 TDO.
+
+**Why**: PA0/PA1 are ODIO-only and PA2 is not routed to the stock expansion
+headers. The first candidate nRESET pin, PA9/BP9, is also disconnected on a
+stock board because R24 is DNP; PB2/BP4 is direct and unloaded.
+
+**Additional fixes**: Enabled the SWDIO input buffer on every board profile so
+turnaround reads work, and preloaded SWCLK/SWDIO/nRESET/TDI idle values before
+enabling their output drivers. This avoids briefly asserting target reset or
+driving SWDIO low as the probe boots. G5187 no longer needs the C110x-only
+ODIO acknowledgement, and CI exercises that default.
 
 ## 2026-09-18 FIX Fresh audit: eight defects and regression gates
 
@@ -98,7 +114,7 @@ JTAG on PA3/PA4; the mapping and conflict guard are corrected.
 **Verification**: All 12 host suites pass (11 ASan/UBSan binaries and the
 stack-checker tests). All 15 firmware profiles build with warnings as errors,
 including the newly covered C1105 dual + HFXT configuration. GCC `-fanalyzer`
-passes on the G5187 dual/USB build. C1104 dual is 15,248 B flash and 512 B
+passes on the G5187 dual/USB build. C1104 dual is 15,256 B flash and 512 B
 statics, with a 432 B conservative call-chain bound plus a 64 B required
 margin. The checker rejects the pre-fix image (424 B chain, only 344 B free).
 These are software/build checks; no board was flashed and physical SWD/JTAG,

@@ -119,6 +119,9 @@ void board_init(void)
         DL_GPIO_RESISTOR_PULL_UP,
         DL_GPIO_DRIVE_STRENGTH_LOW,
         DL_GPIO_HIZ_DISABLE);
+    // Output configuration does not enable the input buffer. SWDIO must be
+    // readable during turnaround after its output driver is disabled.
+    IOMUX->SECCFG.PINCM[PROBE_SWDIO_IOMUX] |= IOMUX_PINCM_INENA_ENABLE;
     // NRESET: open-drain with pull-up (active low reset)
     DL_GPIO_initDigitalOutputFeatures(PROBE_NRESET_IOMUX,
         DL_GPIO_INVERSION_DISABLE,
@@ -126,11 +129,12 @@ void board_init(void)
         DL_GPIO_DRIVE_STRENGTH_LOW,
         DL_GPIO_HIZ_ENABLE);
 
-    DL_GPIO_enableOutput(PROBE_SWD_PORT, PROBE_SWCLK_PIN | PROBE_SWDIO_PIN | PROBE_NRESET_PIN);
-
-    // Idle levels
+    // Preload idle levels before enabling the output drivers. GPIO DOUT
+    // resets low, so enabling first would briefly assert target reset and
+    // drive SWDIO low during probe startup.
     DL_GPIO_clearPins(PROBE_SWD_PORT, PROBE_SWCLK_PIN);
     DL_GPIO_setPins(PROBE_SWD_PORT, PROBE_SWDIO_PIN | PROBE_NRESET_PIN);
+    DL_GPIO_enableOutput(PROBE_SWD_PORT, PROBE_SWCLK_PIN | PROBE_SWDIO_PIN | PROBE_NRESET_PIN);
 
     // UART config
     static const DL_UART_Main_ClockConfig uart_clk = {
@@ -162,8 +166,8 @@ void board_init(void)
     // pins are disconnected and every TDO read returns 0.
     DL_GPIO_initDigitalOutput(PROBE_JTAG_TDI_IOMUX);
     DL_GPIO_initDigitalInput(PROBE_JTAG_TDO_IOMUX);
-    DL_GPIO_enableOutput(GPIOA, PROBE_JTAG_TDI_PIN_DEF);
     DL_GPIO_clearPins(GPIOA, PROBE_JTAG_TDI_PIN_DEF);
+    DL_GPIO_enableOutput(GPIOA, PROBE_JTAG_TDI_PIN_DEF);
 #endif
 
     systick_init_free_running();

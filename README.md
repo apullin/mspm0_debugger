@@ -22,7 +22,9 @@ The G5187 variant includes native USB 2.0 Full Speed support with up to two CDC 
 - **CDC Port 0**: GDB RSP communication (replaces UART on C1104/C1105)
 - **CDC Port 1**: Optional target VCOM bridge (connects to target's serial output, like J-Link VCOM)
 
-Pinning is not yet finalized. 16-pin parts may be viable for C110x, TODO.
+Custom-board pinning is not yet finalized for C110x. The G5187 LaunchPad
+profile has a tested-for-accessibility expansion-header mapping documented
+below. 16-pin parts may be viable for C110x, TODO.
 
 ## Supported Debug Targets
 
@@ -118,11 +120,11 @@ and transmit. Asynchronous stop replies wait until reception is idle.
 
 | Configuration | Flash | SRAM |
 |---------------|-------|------|
-| Cortex-M only | 13,344 B (81.4%) | 384 B (37.5%) |
-| RISC-V only | 11,680 B (71.3%) | 368 B (35.9%) |
-| Dual (legacy ARM + minimal RV XML) | 15,248 B (93.1%) | 512 B (50.0%) |
+| Cortex-M only | 13,352 B (81.5%) | 384 B (37.5%) |
+| RISC-V only | 11,688 B (71.3%) | 368 B (35.9%) |
+| Dual (legacy ARM + minimal RV XML) | 15,256 B (93.1%) | 512 B (50.0%) |
 
-The GCC 12.2.1 dual image has 1,136 B of flash headroom and 512 B available
+The GCC 12.2.1 dual image has 1,128 B of flash headroom and 512 B available
 for the stack. Its conservative linked call-chain bound is 432 B; the build
 requires another 64 B of margin before generating flashable images.
 `tools/check_stack.py` combines GCC stack-usage reports with the linked call
@@ -139,9 +141,9 @@ retransmit-on-NACK enabled.
 
 | Configuration | Flash | SRAM |
 |---------------|-------|------|
-| Cortex-M only | 16,208 B (49.5%) | 1,056 B (12.9%) |
-| RISC-V only | 11,224 B (34.3%) | 616 B (7.5%) |
-| Dual (CM + RV) | 21,984 B (67.1%) | 1,120 B (13.7%) |
+| Cortex-M only | 16,224 B (49.5%) | 1,056 B (12.9%) |
+| RISC-V only | 11,232 B (34.3%) | 616 B (7.5%) |
+| Dual (CM + RV) | 21,992 B (67.1%) | 1,120 B (13.7%) |
 
 Optional HFXT uses PA5/HFXIN (PINCM8) and PA6/HFXOUT (PINCM9); it does not
 conflict with the JTAG TDI/TDO mapping on PA3/PA4 (PINCM6/7).
@@ -153,9 +155,25 @@ Disabling VCOM produces a single-port descriptor. TinyUSB stack included.
 
 | Configuration | Flash | SRAM |
 |---------------|-------|------|
-| Cortex-M only + USB | 25,696 B (19.6%) | 3,016 B (9.2%) |
-| RISC-V only + USB | 20,720 B (15.8%) | 2,576 B (7.9%) |
-| Dual (CM + RV) + USB | 31,480 B (24.0%) | 3,080 B (9.4%) |
+| Cortex-M only + USB | 25,760 B (19.7%) | 3,016 B (9.2%) |
+| RISC-V only + USB | 20,776 B (15.9%) | 2,576 B (7.9%) |
+| Dual (CM + RV) + USB | 31,544 B (24.1%) | 3,080 B (9.4%) |
+
+The LP-MSPM0G5187 uses an accessible, push-pull-capable BoosterPack mapping:
+
+| Signal | MCU pin | BoosterPack pin |
+|--------|---------|-----------------|
+| SWCLK / TCK | PB22 | BP6 |
+| SWDIO / TMS | PB25 | BP8 |
+| Target nRESET | PB2 | BP4 |
+| JTAG TDI (optional) | PA28 | BP36 |
+| JTAG TDO (optional) | PB1 | BP37 |
+| Target VCOM TX | PA10 | BP34 |
+| Target VCOM RX | PA11 | BP33 |
+
+PA10/PA11 are also connected to the onboard XDS110 UART through the J101
+7-8 and 9-10 shunts. Remove those two shunts before wiring an external
+target's UART, or the XDS110 and target can contend on the same signals.
 
 ## Host-Side Unit Tests
 
@@ -227,7 +245,7 @@ cmake --build build_dual -j
 
 G5187 USB build (native USB-CDC, no external UART bridge needed):
 ```
-cmake -S . -B build_g5187 -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-gcc.cmake -DPROBE_DEVICE=MSPM0G5187 -DPROBE_ALLOW_ODIO_SWD_PINS=ON
+cmake -S . -B build_g5187 -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-gcc.cmake -DPROBE_DEVICE=MSPM0G5187
 cmake --build build_g5187 -j
 ```
 
@@ -249,7 +267,7 @@ At least one of `PROBE_ENABLE_CORTEXM` or `PROBE_ENABLE_RISCV` must be enabled.
 - `-DPROBE_USE_HFXT=ON` - Use a 4-32 MHz external crystal (C1105 only)
 - `-DPROBE_ENABLE_VCOM=OFF` - Remove the target VCOM bridge and its second
   USB CDC interface (G5187 only)
-- `-DPROBE_ALLOW_ODIO_SWD_PINS=ON` - Explicitly acknowledge the current
+- `-DPROBE_ALLOW_ODIO_SWD_PINS=ON` - Explicitly acknowledge the C1104/C1105
   bring-up-only PA0/PA1 placeholder mapping
 
 On C1104, disabling the full target XML selects GDB's 42-register legacy ARM
@@ -293,13 +311,12 @@ Goal:
 
 As this has not had a hardware built yet, this is all estimated, pending testing!
 
-The checked-in board mappings still place shared SWCLK/TCK and SWDIO/TMS on
-PA0/PA1. Those are ODIO/open-drain pins and cannot generate a
-production-quality SWD or JTAG clock. CMake
-therefore refuses to build unless that mapping is explicitly acknowledged with
-`PROBE_ALLOW_ODIO_SWD_PINS=ON`. Replace the mapping with SDIO/HSIO-capable pins
-when the schematic is finalized, then remove the gate; do not treat the opt-in
-as hardware approval.
+The G5187 LaunchPad mapping uses regular GPIOs on BP4/BP6/BP8, as listed
+above. The C1104/C1105 board mappings still place shared SWCLK/TCK and
+SWDIO/TMS on PA0/PA1. Those are ODIO/open-drain pins and cannot generate a
+production-quality SWD or JTAG clock, so CMake refuses those two profiles
+unless the mapping is explicitly acknowledged with
+`PROBE_ALLOW_ODIO_SWD_PINS=ON`. Do not treat that opt-in as hardware approval.
 
 This project currently runs the probe MCU from SYSOSC and only needs "good enough" clock accuracy for UART baud rate and `delay_us()`.
 

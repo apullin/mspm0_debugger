@@ -22,24 +22,31 @@
 // Power startup delay cycles
 #define POWER_STARTUP_DELAY 16
 
-// SWD bitbang pins (adjust when schematic is finalized)
-#define PROBE_SWD_PORT      GPIOA
-#define PROBE_SWCLK_PIN     DL_GPIO_PIN_0
-#define PROBE_SWDIO_PIN     DL_GPIO_PIN_1
+// LaunchPad BoosterPack debug connector mapping. These are ordinary
+// push-pull GPIOs with no conflicting on-board loads:
+//   BP4  PB2  = target nRESET (open-drain)
+//   BP6  PB22 = SWCLK/TCK
+//   BP8  PB25 = SWDIO/TMS
+#define PROBE_SWCLK_PORT    GPIOB
+#define PROBE_SWCLK_PIN     DL_GPIO_PIN_22
+#define PROBE_SWCLK_IOMUX   (IOMUX_PINCM50)
+#define PROBE_SWDIO_PORT    GPIOB
+#define PROBE_SWDIO_PIN     DL_GPIO_PIN_25
+#define PROBE_SWDIO_IOMUX   (IOMUX_PINCM56)
+#define PROBE_NRESET_PORT   GPIOB
 #define PROBE_NRESET_PIN    DL_GPIO_PIN_2
-#define PROBE_SWCLK_IOMUX   (IOMUX_PINCM1)
-#define PROBE_SWDIO_IOMUX   (IOMUX_PINCM2)
-// PINCM numbering is device-specific: PA2 is PINCM7 on G518x.
-#define PROBE_NRESET_IOMUX  (IOMUX_PINCM7)
+#define PROBE_NRESET_IOMUX  (IOMUX_PINCM15)
 
 #if defined(PROBE_ENABLE_JTAG) && (PROBE_ENABLE_JTAG)
-// JTAG data pins: TDI = PA3 (PINCM8), TDO = PA4 (PINCM9); see
-// IOMUX_PINCMn_PF_GPIOA_DIOxx in mspm0g518x.h. PA3/PA4 double as the LFXT
-// pins, which this firmware does not use.
-#define PROBE_JTAG_TDI_PIN_DEF  DL_GPIO_PIN_3
-#define PROBE_JTAG_TDO_PIN_DEF  DL_GPIO_PIN_4
-#define PROBE_JTAG_TDI_IOMUX    (IOMUX_PINCM8)
-#define PROBE_JTAG_TDO_IOMUX    (IOMUX_PINCM9)
+// Optional JTAG data pins continue the expansion-header mapping:
+//   BP36 PA28 = TDI
+//   BP37 PB1  = TDO
+#define PROBE_JTAG_TDI_PORT     GPIOA
+#define PROBE_JTAG_TDI_PIN      DL_GPIO_PIN_28
+#define PROBE_JTAG_TDI_IOMUX    (IOMUX_PINCM3)
+#define PROBE_JTAG_TDO_PORT     GPIOB
+#define PROBE_JTAG_TDO_PIN      DL_GPIO_PIN_1
+#define PROBE_JTAG_TDO_IOMUX    (IOMUX_PINCM13)
 #endif
 
 #if defined(PROBE_ENABLE_VCOM) && PROBE_ENABLE_VCOM
@@ -117,7 +124,9 @@ static void gpio_init(void)
 {
     // Reset and enable power to GPIO
     DL_GPIO_reset(GPIOA);
+    DL_GPIO_reset(GPIOB);
     DL_GPIO_enablePower(GPIOA);
+    DL_GPIO_enablePower(GPIOB);
     delay_cycles(POWER_STARTUP_DELAY);
 
     // SWD pins: SWCLK push-pull; SWDIO push-pull while driving, Hi-Z with
@@ -129,17 +138,24 @@ static void gpio_init(void)
         DL_GPIO_RESISTOR_PULL_UP,
         DL_GPIO_DRIVE_STRENGTH_LOW,
         DL_GPIO_HIZ_DISABLE);
+    // Output configuration does not enable the input buffer. SWDIO must be
+    // readable during turnaround after its output driver is disabled.
+    IOMUX->SECCFG.PINCM[PROBE_SWDIO_IOMUX] |= IOMUX_PINCM_INENA_ENABLE;
     DL_GPIO_initDigitalOutputFeatures(PROBE_NRESET_IOMUX,
         DL_GPIO_INVERSION_DISABLE,
         DL_GPIO_RESISTOR_PULL_UP,
         DL_GPIO_DRIVE_STRENGTH_LOW,
         DL_GPIO_HIZ_ENABLE);
 
-    DL_GPIO_enableOutput(PROBE_SWD_PORT, PROBE_SWCLK_PIN | PROBE_SWDIO_PIN | PROBE_NRESET_PIN);
-
-    // Idle levels: SWCLK low, SWDIO/NRESET high (released)
-    DL_GPIO_clearPins(PROBE_SWD_PORT, PROBE_SWCLK_PIN);
-    DL_GPIO_setPins(PROBE_SWD_PORT, PROBE_SWDIO_PIN | PROBE_NRESET_PIN);
+    // Preload idle levels before enabling the output drivers. GPIO DOUT
+    // resets low, so enabling first would briefly assert target reset and
+    // drive SWDIO low during probe startup.
+    DL_GPIO_clearPins(PROBE_SWCLK_PORT, PROBE_SWCLK_PIN);
+    DL_GPIO_setPins(PROBE_SWDIO_PORT, PROBE_SWDIO_PIN);
+    DL_GPIO_setPins(PROBE_NRESET_PORT, PROBE_NRESET_PIN);
+    DL_GPIO_enableOutput(PROBE_SWCLK_PORT, PROBE_SWCLK_PIN);
+    DL_GPIO_enableOutput(PROBE_SWDIO_PORT, PROBE_SWDIO_PIN);
+    DL_GPIO_enableOutput(PROBE_NRESET_PORT, PROBE_NRESET_PIN);
 
 #if defined(PROBE_ENABLE_JTAG) && (PROBE_ENABLE_JTAG)
     // JTAG data pins (TCK/TMS reuse the SWD pins configured above).
@@ -147,8 +163,8 @@ static void gpio_init(void)
     // TDO read returns 0.
     DL_GPIO_initDigitalOutput(PROBE_JTAG_TDI_IOMUX);
     DL_GPIO_initDigitalInput(PROBE_JTAG_TDO_IOMUX);
-    DL_GPIO_enableOutput(GPIOA, PROBE_JTAG_TDI_PIN_DEF);
-    DL_GPIO_clearPins(GPIOA, PROBE_JTAG_TDI_PIN_DEF);
+    DL_GPIO_clearPins(PROBE_JTAG_TDI_PORT, PROBE_JTAG_TDI_PIN);
+    DL_GPIO_enableOutput(PROBE_JTAG_TDI_PORT, PROBE_JTAG_TDI_PIN);
 #endif
 }
 
@@ -338,85 +354,78 @@ void vcom_poll(void)
 void swclk_write(int level)
 {
     if (level) {
-        DL_GPIO_setPins(PROBE_SWD_PORT, PROBE_SWCLK_PIN);
+        DL_GPIO_setPins(PROBE_SWCLK_PORT, PROBE_SWCLK_PIN);
     } else {
-        DL_GPIO_clearPins(PROBE_SWD_PORT, PROBE_SWCLK_PIN);
+        DL_GPIO_clearPins(PROBE_SWCLK_PORT, PROBE_SWCLK_PIN);
     }
 }
 
 void swdio_write(int level)
 {
     if (level) {
-        DL_GPIO_setPins(PROBE_SWD_PORT, PROBE_SWDIO_PIN);
+        DL_GPIO_setPins(PROBE_SWDIO_PORT, PROBE_SWDIO_PIN);
     } else {
-        DL_GPIO_clearPins(PROBE_SWD_PORT, PROBE_SWDIO_PIN);
+        DL_GPIO_clearPins(PROBE_SWDIO_PORT, PROBE_SWDIO_PIN);
     }
 }
 
 int swdio_read(void)
 {
-    return (DL_GPIO_readPins(PROBE_SWD_PORT, PROBE_SWDIO_PIN) ? 1 : 0);
+    return (DL_GPIO_readPins(PROBE_SWDIO_PORT, PROBE_SWDIO_PIN) ? 1 : 0);
 }
 
 void swdio_dir_out(void)
 {
-    DL_GPIO_enableOutput(PROBE_SWD_PORT, PROBE_SWDIO_PIN);
+    DL_GPIO_enableOutput(PROBE_SWDIO_PORT, PROBE_SWDIO_PIN);
 }
 
 void swdio_dir_in(void)
 {
-    DL_GPIO_disableOutput(PROBE_SWD_PORT, PROBE_SWDIO_PIN);
+    DL_GPIO_disableOutput(PROBE_SWDIO_PORT, PROBE_SWDIO_PIN);
 }
 
 void nreset_write(int level)
 {
     if (level) {
-        DL_GPIO_setPins(PROBE_SWD_PORT, PROBE_NRESET_PIN);
+        DL_GPIO_setPins(PROBE_NRESET_PORT, PROBE_NRESET_PIN);
     } else {
-        DL_GPIO_clearPins(PROBE_SWD_PORT, PROBE_NRESET_PIN);
+        DL_GPIO_clearPins(PROBE_NRESET_PORT, PROBE_NRESET_PIN);
     }
 }
 
 // ---------------- JTAG HAL (optional) ----------------
 #if defined(PROBE_ENABLE_JTAG) && (PROBE_ENABLE_JTAG)
 
-// JTAG pins (adjust when schematic is finalized)
-#define PROBE_JTAG_PORT     GPIOA
-#define PROBE_JTAG_TCK_PIN  DL_GPIO_PIN_0   // same as SWCLK
-#define PROBE_JTAG_TMS_PIN  DL_GPIO_PIN_1   // same as SWDIO
-#define PROBE_JTAG_TDI_PIN  PROBE_JTAG_TDI_PIN_DEF
-#define PROBE_JTAG_TDO_PIN  PROBE_JTAG_TDO_PIN_DEF
-
 void jtag_tck_write(int level)
 {
     if (level) {
-        DL_GPIO_setPins(PROBE_JTAG_PORT, PROBE_JTAG_TCK_PIN);
+        DL_GPIO_setPins(PROBE_SWCLK_PORT, PROBE_SWCLK_PIN);
     } else {
-        DL_GPIO_clearPins(PROBE_JTAG_PORT, PROBE_JTAG_TCK_PIN);
+        DL_GPIO_clearPins(PROBE_SWCLK_PORT, PROBE_SWCLK_PIN);
     }
 }
 
 void jtag_tms_write(int level)
 {
     if (level) {
-        DL_GPIO_setPins(PROBE_JTAG_PORT, PROBE_JTAG_TMS_PIN);
+        DL_GPIO_setPins(PROBE_SWDIO_PORT, PROBE_SWDIO_PIN);
     } else {
-        DL_GPIO_clearPins(PROBE_JTAG_PORT, PROBE_JTAG_TMS_PIN);
+        DL_GPIO_clearPins(PROBE_SWDIO_PORT, PROBE_SWDIO_PIN);
     }
 }
 
 void jtag_tdi_write(int level)
 {
     if (level) {
-        DL_GPIO_setPins(PROBE_JTAG_PORT, PROBE_JTAG_TDI_PIN);
+        DL_GPIO_setPins(PROBE_JTAG_TDI_PORT, PROBE_JTAG_TDI_PIN);
     } else {
-        DL_GPIO_clearPins(PROBE_JTAG_PORT, PROBE_JTAG_TDI_PIN);
+        DL_GPIO_clearPins(PROBE_JTAG_TDI_PORT, PROBE_JTAG_TDI_PIN);
     }
 }
 
 int jtag_tdo_read(void)
 {
-    return (DL_GPIO_readPins(PROBE_JTAG_PORT, PROBE_JTAG_TDO_PIN) ? 1 : 0);
+    return (DL_GPIO_readPins(PROBE_JTAG_TDO_PORT, PROBE_JTAG_TDO_PIN) ? 1 : 0);
 }
 
 #endif // PROBE_ENABLE_JTAG

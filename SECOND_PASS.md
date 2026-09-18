@@ -95,13 +95,15 @@ that deserve their own designs.
 
 ## Hardware / bring-up board
 
-- **PIN CHOICE WARNING: PA0/PA1 are ODIO pins** (open-drain only, no
-  push-pull high, ~1 MHz rated, 5 V tolerant — they're the I2C pins). The
-  current board-file defaults put shared SWCLK/TCK and SWDIO/TMS there as placeholders; the
-  build now requires the explicit `PROBE_ALLOW_ODIO_SWD_PINS=ON` bring-up
-  acknowledgement, and the real schematic must use SDIO/HSIO-class pins for
-  both shared debug signals. An ODIO
-  pin IS the ideal home for nRESET (open-drain + pull-up by design).
+- **C1104/C1105 PIN CHOICE WARNING: PA0/PA1 are ODIO pins** (open-drain only,
+  no push-pull high, ~1 MHz rated, 5 V tolerant — they're the I2C pins). The
+  C1104/C1105 board-file defaults put shared SWCLK/TCK and SWDIO/TMS there as
+  placeholders; those builds require the explicit
+  `PROBE_ALLOW_ODIO_SWD_PINS=ON` bring-up acknowledgement, and the real
+  schematic must use SDIO/HSIO-class pins for both shared debug signals. An
+  ODIO pin IS the ideal home for nRESET (open-drain + pull-up by design). The
+  G5187 LaunchPad profile has a usable expansion-header mapping on regular
+  GPIOs: PB22/BP6 SWCLK, PB25/BP8 SWDIO, and PB2/BP4 nRESET.
 - **VTref sensing via ADC**: one channel behind a ~100k/100k divider
   (+ ~10 nF) covers 0-6.6 V at ~1.6 mV/LSB — plenty to classify
   off/1.8/3.3/5V. A second undivided channel adds low-range accuracy but
@@ -161,8 +163,8 @@ that deserve their own designs.
   HFXIN/HFXOUT are PA5/PA6 (PINCM8/9), while JTAG TDI/TDO are PA3/PA4
   (PINCM6/7). The erroneous conflict guard is removed and CI builds both together.
 - **C1104 has no PA3** — its TDI/TDO are PA4 (PINCM5) / PA6 (PINCM7).
-- **G5187 PA3/PA4 double as LFXT pins** (unused by this firmware, but a
-  32 kHz crystal on the board would conflict with JTAG).
+- **G5187 JTAG avoids the LFXT pins**: the finalized LaunchPad mapping uses
+  PA28/BP36 for TDI and PB1/BP37 for TDO, leaving PA3/PA4 available for LFXT.
 - **SWDIO is now push-pull while driving** (Hi-Z + pull-up when
   listening), per the QUESTIONS.md intent — the planned external 100k
   pull-up is still wanted for the idle/turnaround states.

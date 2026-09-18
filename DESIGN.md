@@ -29,11 +29,13 @@ Probe clocks:
 Timing uses a free-running SysTick (24-bit). `delay_us()` and `hal_time_us()`
 retain sub-MHz clock fractions through the project-owned divider/remainder path.
 
-The schematic is not set. The placeholder PA0/PA1 mapping for shared
-SWCLK/TCK and SWDIO/TMS uses ODIO pins, which cannot drive a production debug
-clock; configuration fails unless the developer
-explicitly acknowledges it with `PROBE_ALLOW_ODIO_SWD_PINS=ON`. Final hardware
-must move both shared debug signals to SDIO/HSIO-capable pins.
+The C1104/C1105 schematic is not set. Their placeholder PA0/PA1 mapping for
+shared SWCLK/TCK and SWDIO/TMS uses ODIO pins, which cannot drive a production
+debug clock; those configurations fail unless the developer explicitly
+acknowledges them with `PROBE_ALLOW_ODIO_SWD_PINS=ON`. Final C110x hardware
+must move both shared debug signals to SDIO/HSIO-capable pins. The G5187
+LaunchPad profile instead uses push-pull-capable PB22/BP6 for SWCLK,
+PB25/BP8 for SWDIO, and PB2/BP4 for target nRESET.
 
 When we have this all building, we check the consumed resources (linker prints memory usage, and we also run `arm-none-eabi-size`).
 

@@ -123,7 +123,7 @@ jobs:
           -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-gcc.cmake
           -DMSPM0_SDK_PATH=${{ github.workspace }}/ti-sdk
           -DPROBE_DEVICE=${{ matrix.device }}
-          -DPROBE_ALLOW_ODIO_SWD_PINS=ON
+          -DPROBE_ALLOW_ODIO_SWD_PINS=${{ matrix.device != 'MSPM0G5187' }}
           -DPROBE_WARNINGS_AS_ERRORS=ON
           ${{ matrix.arch_args }}
 

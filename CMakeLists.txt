@@ -33,7 +33,7 @@ set(PROBE_UART_BAUD "115200" CACHE STRING "UART baud rate for GDB RSP")
 set(PROBE_SWD_DELAY_US "0" CACHE STRING "Microseconds delay per SWD clock cycle (0=max speed, increase for slow targets/long wires)")
 set(PROBE_RISCV_JTAG_IR_LEN "5" CACHE STRING "RISC-V JTAG DTM instruction-register length in bits (5-32)")
 option(PROBE_ALLOW_ODIO_SWD_PINS
-    "Acknowledge placeholder PA0/PA1 ODIO pins for shared SWCLK/TCK and SWDIO/TMS (not production-capable)"
+    "Acknowledge the C1104/C1105 placeholder PA0/PA1 ODIO debug pins (not production-capable)"
     OFF)
 option(PROBE_WARNINGS_AS_ERRORS "Treat firmware compiler warnings as errors" OFF)
 
@@ -220,9 +220,10 @@ else()
     message(FATAL_ERROR "Unknown PROBE_DEVICE='${PROBE_DEVICE}'. Use MSPM0C1104, MSPM0C1105, or MSPM0G5187.")
 endif()
 
-if(NOT PROBE_ALLOW_ODIO_SWD_PINS)
+if(NOT PROBE_ALLOW_ODIO_SWD_PINS AND
+   (PROBE_DEVICE STREQUAL "MSPM0C1104" OR PROBE_DEVICE STREQUAL "MSPM0C1105"))
     message(FATAL_ERROR
-        "The current board files still route shared SWCLK/TCK and SWDIO/TMS to PA0/PA1 ODIO pins. "
+        "The ${PROBE_DEVICE} board file still routes shared SWCLK/TCK and SWDIO/TMS to PA0/PA1 ODIO pins. "
         "Those open-drain pins cannot generate a production SWD or JTAG clock. Finalize the schematic/pin map, "
         "or pass -DPROBE_ALLOW_ODIO_SWD_PINS=ON to acknowledge this bring-up-only placeholder.")
 endif()
