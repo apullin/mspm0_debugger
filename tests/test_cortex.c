@@ -58,6 +58,9 @@ static uint32_t      g_cpuid;
 static uint32_t      g_dfsr;
 static uint32_t      g_resume_halt_cause;
 static bool          g_fail_dfsr_read;
+static uint32_t      g_fpb_comp;
+static uint32_t      g_dwt_func;
+static uint32_t      g_fail_enable_after_apply;
 
 static void mock_reset(void)
 {
@@ -79,6 +82,9 @@ static void mock_reset(void)
     g_dfsr              = 0u;
     g_resume_halt_cause = 0u;
     g_fail_dfsr_read     = false;
+    g_fpb_comp          = 0u;
+    g_dwt_func          = 0u;
+    g_fail_enable_after_apply = 0u;
 }
 
 uint32_t hal_time_us(void)
@@ -158,9 +164,15 @@ bool target_mem_write_word(uint32_t addr, uint32_t value)
         }
     }
     if (succeed) {
+        if (addr == FPB_COMP0) g_fpb_comp = value;
+        if (addr == DWT_FUNC0) g_dwt_func = value;
         if (addr == DFSR) g_dfsr &= ~value;
         if (addr == DHCSR && value == (DHCSR_DBGKEY | DHCSR_C_DEBUGEN)) {
             g_dfsr |= g_resume_halt_cause;
+        }
+        if (addr == g_fail_enable_after_apply && value != 0u) {
+            g_fail_enable_after_apply = 0u;
+            succeed = false; // Peripheral write applied, posted completion failed.
         }
     }
     if (g_write_count < ARRAY_SIZE(g_writes)) {
@@ -403,6 +415,8 @@ static bool test_breakpoint_remove_retains_bookkeeping_on_write_failure(void)
     CHECK(!cortex_breakpoint_remove(old_addr));
 
     // There is only one comparator. A failed removal must leave it owned.
+    // Its enabled state is uncertain, so a duplicate cannot claim success.
+    CHECK(!cortex_breakpoint_insert(old_addr));
     CHECK(!cortex_breakpoint_insert(new_addr));
 
     g_fail_write_count = 0u;
@@ -424,6 +438,49 @@ static bool test_m3_xml_uses_gdb_architecture_name(void)
     CHECK(xml != NULL && len != 0u);
     CHECK(strstr(xml, "<architecture>armv7</architecture>") != NULL);
     CHECK(strstr(xml, "armv7-m") == NULL);
+    return true;
+}
+
+static bool test_ambiguous_comparator_enable_retains_ownership(void)
+{
+    // Exercise both comparator kinds, successful/failed rollback, and each
+    // cleanup API. A failed enable really arms the mock hardware.
+    for (unsigned dwt = 0; dwt < 2u; dwt++) {
+        for (unsigned rollback_fails = 0; rollback_fails < 2u; rollback_fails++) {
+            for (unsigned clear_all = 0; clear_all < 2u; clear_all++) {
+                mock_reset();
+                CHECK(initialize_target_and_resources());
+                uint32_t reg = dwt ? DWT_FUNC0 : FPB_COMP0;
+                g_fail_enable_after_apply = reg;
+                g_fail_write_addr = reg;
+                g_fail_write_value = 0u;
+                g_fail_write_count = rollback_fails ? 2u : 0u;
+                bool inserted = dwt ? cortex_watchpoint_insert(CORTEXM_WATCH_WRITE, 0x20000000u, 4u) :
+                                      cortex_breakpoint_insert(0x1000u);
+                CHECK(!inserted);
+                CHECK(((dwt ? g_dwt_func : g_fpb_comp) != 0u) == (rollback_fails != 0u));
+                if (rollback_fails) {
+                    // Neither a duplicate nor a new address may claim success
+                    // while the sole comparator is in an uncertain state.
+                    CHECK(!(dwt ? cortex_watchpoint_insert(CORTEXM_WATCH_WRITE, 0x20000000u, 4u) :
+                                  cortex_breakpoint_insert(0x1000u)));
+                    CHECK(!(dwt ? cortex_watchpoint_insert(CORTEXM_WATCH_WRITE, 0x20000004u, 4u) :
+                                  cortex_breakpoint_insert(0x2000u)));
+                    CHECK(!cortex_debug_resources_clear());
+                    CHECK((dwt ? g_dwt_func : g_fpb_comp) != 0u);
+                }
+                if (clear_all) {
+                    CHECK(cortex_debug_resources_clear());
+                } else {
+                    CHECK(dwt ? cortex_watchpoint_remove(CORTEXM_WATCH_WRITE, 0x20000000u, 4u) :
+                                cortex_breakpoint_remove(0x1000u));
+                }
+                CHECK((dwt ? g_dwt_func : g_fpb_comp) == 0u);
+                CHECK(dwt ? cortex_watchpoint_insert(CORTEXM_WATCH_WRITE, 0x20000004u, 4u) :
+                            cortex_breakpoint_insert(0x2000u));
+            }
+        }
+    }
     return true;
 }
 
@@ -451,6 +508,7 @@ int main(void)
         {"session state reset", test_new_session_forgets_breakpoint_and_watchpoint_ownership},
         {"watchpoint validation", test_watchpoint_rejects_invalid_length_and_alignment},
         {"breakpoint removal failure", test_breakpoint_remove_retains_bookkeeping_on_write_failure},
+        {"ambiguous comparator enable", test_ambiguous_comparator_enable_retains_ownership},
         {"Cortex-M3 target XML", test_m3_xml_uses_gdb_architecture_name},
     };
 

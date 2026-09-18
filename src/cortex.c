@@ -64,6 +64,7 @@ static uint32_t dwt_func_reg(uint8_t slot) { return DWT_FUNC0 + 0x10u * (uint32_
 typedef struct {
     uint32_t addr;
     bool     used;
+    bool     confirmed; // false while an ambiguous enable/disable needs cleanup
 } fpb_slot_t;
 
 static bool     g_fpb_inited   = false;
@@ -85,6 +86,7 @@ typedef struct {
     uint32_t         len;
     cortexm_watch_t  type;
     bool             used;
+    bool             confirmed;
     uint8_t          slot;
 } dwt_slot_t;
 
@@ -868,6 +870,7 @@ bool cortex_debug_resources_clear(void)
     if (g_fpb_inited) {
         for (uint8_t i = 0; i < g_fpb_num_code; i++) {
             if (g_fpb_slots[i].used) {
+                g_fpb_slots[i].confirmed = false;
                 if (target_mem_write_word(FPB_COMP0 + 4u * (uint32_t) i, 0u)) {
                     g_fpb_slots[i].used = false;
                     g_fpb_slots[i].addr = 0u;
@@ -885,6 +888,7 @@ bool cortex_debug_resources_clear(void)
                 continue;
             }
             uint8_t slot = g_dwt_slots[i].slot;
+            g_dwt_slots[i].confirmed = false;
             bool cleared = target_mem_write_word(dwt_func_reg(slot), 0u);
             if (cleared && !cortex_target_is_v8m()) {
                 cleared = target_mem_write_word(dwt_mask_reg(slot), 0u);
@@ -918,7 +922,7 @@ bool cortex_breakpoint_insert(uint32_t addr)
     // Already installed?
     for (uint8_t i = 0; i < g_fpb_num_code; i++) {
         if (g_fpb_slots[i].used && g_fpb_slots[i].addr == addr) {
-            return true;
+            return g_fpb_slots[i].confirmed;
         }
     }
 
@@ -928,11 +932,18 @@ bool cortex_breakpoint_insert(uint32_t addr)
             if (!fpb_comp_value(addr, &comp)) {
                 return false; // address not encodable on this FPB revision
             }
-            if (!target_mem_write_word(FPB_COMP0 + 4u * (uint32_t) i, comp)) {
-                return false;
-            }
+            // A failed posted write may still arm the comparator. Reserve it
+            // before enabling and retain ownership until disable succeeds.
             g_fpb_slots[i].used = true;
             g_fpb_slots[i].addr = addr;
+            g_fpb_slots[i].confirmed = false;
+            if (!target_mem_write_word(FPB_COMP0 + 4u * (uint32_t) i, comp)) {
+                if (target_mem_write_word(FPB_COMP0 + 4u * (uint32_t) i, 0u)) {
+                    g_fpb_slots[i].used = false;
+                }
+                return false;
+            }
+            g_fpb_slots[i].confirmed = true;
             return true;
         }
     }
@@ -950,6 +961,7 @@ bool cortex_breakpoint_remove(uint32_t addr)
 
     for (uint8_t i = 0; i < g_fpb_num_code; i++) {
         if (g_fpb_slots[i].used && g_fpb_slots[i].addr == addr) {
+            g_fpb_slots[i].confirmed = false;
             if (!target_mem_write_word(FPB_COMP0 + 4u * (uint32_t) i, 0u)) {
                 return false;
             }
@@ -975,7 +987,7 @@ bool cortex_watchpoint_insert(cortexm_watch_t type, uint32_t addr, uint32_t len)
     for (uint8_t i = 0; i < g_dwt_num_comp; i++) {
         if (g_dwt_slots[i].used && g_dwt_slots[i].addr == addr && g_dwt_slots[i].len == len &&
             g_dwt_slots[i].type == type) {
-            return true;
+            return g_dwt_slots[i].confirmed;
         }
     }
 
@@ -1020,16 +1032,19 @@ bool cortex_watchpoint_insert(cortexm_watch_t type, uint32_t addr, uint32_t len)
             return false;
         }
     }
-    if (!target_mem_write_word(dwt_func_reg(slot), func)) {
-        (void) target_mem_write_word(dwt_func_reg(slot), 0u);
-        return false;
-    }
-
     g_dwt_slots[slot].used = true;
     g_dwt_slots[slot].addr = addr;
     g_dwt_slots[slot].len  = len;
     g_dwt_slots[slot].type = type;
     g_dwt_slots[slot].slot = slot;
+    g_dwt_slots[slot].confirmed = false;
+    if (!target_mem_write_word(dwt_func_reg(slot), func)) {
+        if (target_mem_write_word(dwt_func_reg(slot), 0u)) {
+            g_dwt_slots[slot].used = false;
+        }
+        return false;
+    }
+    g_dwt_slots[slot].confirmed = true;
     return true;
 #else
     (void) type;
@@ -1062,6 +1077,7 @@ bool cortex_watchpoint_remove(cortexm_watch_t type, uint32_t addr, uint32_t len)
         if (g_dwt_slots[i].used && g_dwt_slots[i].addr == addr && g_dwt_slots[i].len == len &&
             g_dwt_slots[i].type == type) {
             uint8_t slot = g_dwt_slots[i].slot;
+            g_dwt_slots[i].confirmed = false;
             if (!target_mem_write_word(dwt_func_reg(slot), 0u)) {
                 return false;
             }
