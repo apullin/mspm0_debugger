@@ -1309,7 +1309,10 @@ bool riscv_watchpoint_hit(target_watch_t *out_type, uint32_t *out_addr)
 
 bool riscv_debug_resources_clear(void)
 {
-    if (!g_dm_active) return riscv_owned_trigger_mask() == 0;
+    // Trigger CSRs are optional. A target without triggers must still be
+    // detachable, and there is nothing to access if we own no comparators.
+    if (riscv_owned_trigger_mask() == 0u) return true;
+    if (!g_dm_active) return false;
 
     uint32_t saved_tselect;
     if (!riscv_read_csr(CSR_TSELECT, &saved_tselect)) return false;

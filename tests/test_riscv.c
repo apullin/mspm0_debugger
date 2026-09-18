@@ -101,6 +101,8 @@ static unsigned sba32_reads;
 static unsigned sba32_writes;
 static unsigned abstract_byte_ops;
 static unsigned resume_with_step_count;
+static bool mock_no_triggers;
+static uint32_t mock_abstract_error;
 
 void delay_us(uint32_t us)
 {
@@ -197,7 +199,7 @@ bool jtag_dmi_read(uint32_t addr, uint32_t *data)
                     (mock_resume_ack ? DMSTATUS_ALLRESUMEACK : 0u);
             break;
         case DMI_ABSTRACTCS:
-            *data = mock_datacount; // not busy
+            *data = mock_datacount | mock_abstract_error; // not busy
             break;
         case DMI_DATA0:
             *data = mock_data0;
@@ -251,6 +253,7 @@ bool jtag_dmi_write(uint32_t addr, uint32_t data)
             }
             return true;
         case DMI_ABSTRACTCS:
+            mock_abstract_error &= ~(data & (7u << 8));
             return true;
         case DMI_DATA0:
             mock_data0 = data;
@@ -268,6 +271,10 @@ bool jtag_dmi_write(uint32_t addr, uint32_t data)
                 return true;
             }
             uint32_t csr = data & 0xffffu;
+            if (mock_no_triggers && csr >= CSR_TSELECT && csr <= CSR_TINFO) {
+                mock_abstract_error = 3u << 8; // Exception: CSR not implemented.
+                return true;
+            }
             bool write = (data & ABSTRACT_WRITE) != 0;
             if (write && csr == CSR_DCSR && !(mock_data0 & DCSR_STEP) &&
                 fail_dcsr_clear_commands > 0) {
@@ -355,6 +362,8 @@ static void mock_reset(void)
     sba32_writes = 0;
     abstract_byte_ops = 0;
     resume_with_step_count = 0;
+    mock_no_triggers = false;
+    mock_abstract_error = 0u;
 }
 
 static void test_version_validation(void)
@@ -514,6 +523,17 @@ int main(void)
     strip_s_mode_on_trigger_write = true;
     CHECK(!riscv_breakpoint_insert(0x3000u));
     CHECK((mock_tdata1[0] >> TRIGGER_TYPE_SHIFT) == TRIGGER_TYPE_DISABLED);
+
+    // Optional trigger CSRs may trap, without preventing attach or detach.
+    mock_reset();
+    mock_no_triggers = true;
+    CHECK(riscv_init());
+    CHECK(!riscv_watchpoints_supported());
+    before = dmi_ops;
+    CHECK(riscv_debug_resources_clear());
+    CHECK(dmi_ops == before); // No tselect access when there is nothing owned.
+    CHECK(riscv_continue());
+    CHECK(!mock_halted);
 
     puts("riscv tests passed");
     return 0;
