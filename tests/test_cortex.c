@@ -18,6 +18,7 @@
 
 #define DHCSR     0xE000EDF0u
 #define CPUID     0xE000ED00u
+#define DFSR      0xE000ED30u
 #define DEMCR     0xE000EDFCu
 #define FPB_CTRL  0xE0002000u
 #define FPB_COMP0 0xE0002008u
@@ -54,6 +55,9 @@ static unsigned      g_fail_write_skip;
 static unsigned      g_fail_write_count;
 static unsigned      g_clear_error_calls;
 static uint32_t      g_cpuid;
+static uint32_t      g_dfsr;
+static uint32_t      g_resume_halt_cause;
+static bool          g_fail_dfsr_read;
 
 static void mock_reset(void)
 {
@@ -72,6 +76,9 @@ static void mock_reset(void)
     g_fail_write_count  = 0u;
     g_clear_error_calls = 0u;
     g_cpuid             = (0x41u << 24) | (0xC60u << 4);
+    g_dfsr              = 0u;
+    g_resume_halt_cause = 0u;
+    g_fail_dfsr_read     = false;
 }
 
 uint32_t hal_time_us(void)
@@ -123,6 +130,9 @@ bool target_mem_read_word(uint32_t addr, uint32_t *out)
     case FPB_CTRL:
         *out = 1u << 4; // One FPB v1 code comparator.
         return true;
+    case DFSR:
+        *out = g_dfsr;
+        return !g_fail_dfsr_read;
     case DEMCR:
         *out = 0u;
         return true;
@@ -145,6 +155,12 @@ bool target_mem_write_word(uint32_t addr, uint32_t value)
         } else {
             g_fail_write_count--;
             succeed = false;
+        }
+    }
+    if (succeed) {
+        if (addr == DFSR) g_dfsr &= ~value;
+        if (addr == DHCSR && value == (DHCSR_DBGKEY | DHCSR_C_DEBUGEN)) {
+            g_dfsr |= g_resume_halt_cause;
         }
     }
     if (g_write_count < ARRAY_SIZE(g_writes)) {
@@ -209,8 +225,9 @@ static bool test_continue_waits_for_s_halt_to_clear(void)
     g_clear_halt_after_reads = 3u;
     CHECK(cortex_continue());
     CHECK(g_dhcsr_reads == 3u);
-    CHECK(g_writes[0].addr == DHCSR);
-    CHECK(g_writes[0].value == (DHCSR_DBGKEY | DHCSR_C_DEBUGEN));
+    CHECK(g_writes[0].addr == DFSR && g_writes[0].value == 0x1Fu);
+    CHECK(g_writes[1].addr == DHCSR);
+    CHECK(g_writes[1].value == (DHCSR_DBGKEY | DHCSR_C_DEBUGEN));
     return true;
 }
 
@@ -220,9 +237,9 @@ static bool test_continue_poll_failure_attempts_rehalt(void)
     g_fail_dhcsr_read = true;
 
     CHECK(!cortex_continue());
-    CHECK(g_write_count == 2u);
-    CHECK(g_writes[0].value == (DHCSR_DBGKEY | DHCSR_C_DEBUGEN));
-    CHECK(g_writes[1].value ==
+    CHECK(g_write_count == 3u);
+    CHECK(g_writes[1].value == (DHCSR_DBGKEY | DHCSR_C_DEBUGEN));
+    CHECK(g_writes[2].value ==
           (DHCSR_DBGKEY | DHCSR_C_DEBUGEN | DHCSR_C_HALT));
     return true;
 }
@@ -236,11 +253,56 @@ static bool test_continue_write_failure_attempts_rehalt(void)
     g_fail_write_count = 1u;
 
     CHECK(!cortex_continue());
-    CHECK(g_write_count == 2u);
-    CHECK(!g_writes[0].succeeded);
-    CHECK(g_writes[1].succeeded);
-    CHECK(g_writes[1].value ==
+    CHECK(g_write_count == 3u);
+    CHECK(!g_writes[1].succeeded);
+    CHECK(g_writes[2].succeeded);
+    CHECK(g_writes[2].value ==
           (DHCSR_DBGKEY | DHCSR_C_DEBUGEN | DHCSR_C_HALT));
+    return true;
+}
+
+static bool test_continue_accepts_rapid_rehalt(void)
+{
+    for (uint32_t cause = 1u; cause <= 16u; cause <<= 1) {
+        mock_reset();
+        g_halt_after_reads = 1u; // S_HALT never observed low.
+        g_resume_halt_cause = cause;
+        CHECK(cortex_continue());
+        CHECK(g_dhcsr_reads == 1u);
+        CHECK(g_dfsr == cause); // Stop reporting still sees the fresh cause.
+        CHECK(g_write_count == 2u); // No spurious halt request.
+    }
+    return true;
+}
+
+static bool test_continue_rejects_stale_halt_cause(void)
+{
+    mock_reset();
+    g_halt_after_reads = 1u;
+    g_time_step_us = 1000u;
+    g_dfsr = 0x1Fu; // No new event after the resume request.
+    CHECK(!cortex_continue());
+    CHECK(g_dfsr == 0u);
+    CHECK(g_time_us >= 10000u);
+    CHECK(g_write_count == 3u); // Best-effort re-halt on timeout.
+    return true;
+}
+
+static bool test_continue_halt_cause_transport_errors(void)
+{
+    mock_reset();
+    g_fail_write_addr = DFSR;
+    g_fail_write_value = 0x1Fu;
+    g_fail_write_count = 1u;
+    CHECK(!cortex_continue());
+    CHECK(g_write_count == 1u); // Never resume without clearing stale causes.
+
+    mock_reset();
+    g_halt_after_reads = 1u;
+    g_fail_dfsr_read = true;
+    CHECK(!cortex_continue());
+    CHECK(g_write_count == 3u);
+    CHECK(g_writes[2].value == (DHCSR_DBGKEY | DHCSR_C_DEBUGEN | DHCSR_C_HALT));
     return true;
 }
 
@@ -381,6 +443,9 @@ int main(void)
         {"continue polls S_HALT clear", test_continue_waits_for_s_halt_to_clear},
         {"continue failure re-halts", test_continue_poll_failure_attempts_rehalt},
         {"continue write ambiguity re-halts", test_continue_write_failure_attempts_rehalt},
+        {"continue accepts rapid re-halt", test_continue_accepts_rapid_rehalt},
+        {"continue rejects stale halt", test_continue_rejects_stale_halt_cause},
+        {"continue halt-cause transport errors", test_continue_halt_cause_transport_errors},
         {"step release cleanup", test_step_release_failure_still_clears_maskints},
         {"step final cleanup failure", test_step_reports_final_maskints_clear_failure},
         {"session state reset", test_new_session_forgets_breakpoint_and_watchpoint_ownership},

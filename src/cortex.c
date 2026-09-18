@@ -21,6 +21,7 @@
 
 #define DEMCR_TRCENA   (1u << 24)
 #define DFSR_DWTTRAP   (1u << 2)
+#define DFSR_HALT_CAUSES 0x1Fu // HALTED, BKPT, DWTTRAP, VCATCH, EXTERNAL (W1C)
 
 #define DHCSR_DBGKEY     (0xA05Fu << 16)
 #define DHCSR_C_DEBUGEN  (1u << 0)
@@ -508,9 +509,11 @@ bool cortex_continue(void)
     if (!cortex_step_maskints_clear(false)) {
         return false;
     }
-    // Request resume, then wait until the core has actually left Debug state.
-    // Otherwise the next RSP poll can observe the old S_HALT and report an
-    // immediate false stop without executing an instruction.
+    // Clear old sticky halt causes so a fresh breakpoint/watchpoint/vector
+    // catch can prove a rapid resume-and-rehalt, even if S_HALT never reads 0.
+    if (!target_mem_write_word(DFSR, DFSR_HALT_CAUSES)) {
+        return false;
+    }
     if (!cortex_write_dhcsr(DHCSR_C_DEBUGEN)) {
         // AP-write failure is ambiguous: the resume may have reached DHCSR
         // even if its posted completion failed. Restore a known halted state.
@@ -524,6 +527,14 @@ bool cortex_continue(void)
             break;
         }
         if ((dhcsr & DHCSR_S_HALT) == 0u) {
+            return true;
+        }
+        uint32_t dfsr;
+        if (!target_mem_read_word(DFSR, &dfsr)) {
+            break;
+        }
+        if (dfsr & DFSR_HALT_CAUSES) {
+            // Leave the new cause intact for the asynchronous stop report.
             return true;
         }
     }
