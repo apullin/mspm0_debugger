@@ -80,8 +80,23 @@ bool target_mem_read_bytes_impl(uint32_t addr, uint8_t *buf, uint32_t len)
     }
 
     while (len) {
-        // Use native MEM-AP byte transfers.  Word-sized reads of peripheral
-        // FIFOs and clear-on-read registers can have destructive side effects.
+        // Preserve aligned word accesses (including word-only MMIO and
+        // clear-on-read registers). Never read outside the requested range.
+        if ((addr & 3u) == 0u && len >= 4u) {
+            uint32_t w;
+            if (!target_mem_read_word(addr, &w)) {
+                return false;
+            }
+            for (uint32_t i = 0; i < 4u; i++) {
+                buf[i] = (uint8_t) (w >> (8u * i));
+            }
+            buf += 4;
+            addr += 4;
+            len -= 4;
+            continue;
+        }
+        // Native byte transfers for an unaligned head or short tail avoid
+        // widening the read to unrelated, potentially side-effectful bytes.
         if (!memap_set_csw_ap(g_memap_ap_sel, CSW_DEFAULT | CSW_SIZE_8) ||
             !memap_set_tar_ap(g_memap_ap_sel, addr)) {
             return false;

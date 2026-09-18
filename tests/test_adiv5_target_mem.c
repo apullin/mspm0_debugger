@@ -45,6 +45,10 @@ static uint32_t    g_rdbuff_value;
 static bool        g_fail_next_rdbuff;
 static unsigned    g_leave_dormant_calls;
 static unsigned    g_jtag_to_swd_calls;
+static uint32_t    g_csw;
+static bool        g_word_only_clear_on_read;
+static uint32_t    g_peripheral_value;
+static bool        g_fail_read_completion;
 
 static void mock_reset(void)
 {
@@ -54,6 +58,10 @@ static void mock_reset(void)
     g_fail_next_rdbuff     = false;
     g_leave_dormant_calls  = 0u;
     g_jtag_to_swd_calls    = 0u;
+    g_csw = 0u;
+    g_word_only_clear_on_read = false;
+    g_peripheral_value = 0u;
+    g_fail_read_completion = false;
     target_mem_set_ap(0u);
 }
 
@@ -65,6 +73,18 @@ swd_xfer_status_t swd_transfer(bool ap, bool rnw, uint8_t addr2, uint32_t *data_
 {
     swd_xfer_status_t result = SWD_XFER_OK;
     uint32_t value = *data_inout;
+
+    if (ap && !rnw && addr2 == AP_CSW_ADDR2) g_csw = value;
+    if (ap && rnw && addr2 == AP_DRW_ADDR2) {
+        if (g_word_only_clear_on_read) {
+            if ((g_csw & 7u) != 2u) result = SWD_XFER_FAULT;
+            else {
+                g_rdbuff_value = g_peripheral_value;
+                g_peripheral_value = 0u;
+            }
+        }
+        if (g_fail_read_completion) g_fail_next_rdbuff = true;
+    }
 
     if (!ap && rnw) {
         if (addr2 == DP_ABORT_ADDR2) {
@@ -241,6 +261,69 @@ static bool test_byte_write_uses_lane_without_read_modify_write(void)
     return true;
 }
 
+static bool test_word_only_clear_on_read_register(void)
+{
+    mock_reset();
+    CHECK(init_link());
+    g_event_count = 0u;
+    g_word_only_clear_on_read = true;
+    g_peripheral_value = 0x44332211u;
+    uint8_t bytes[4] = {0};
+    const uint8_t expected[4] = {0x11, 0x22, 0x33, 0x44};
+    CHECK(target_mem_read_bytes_impl(0xE000ED00u, bytes, sizeof(bytes)));
+    CHECK(memcmp(bytes, expected, sizeof(bytes)) == 0);
+    CHECK(g_peripheral_value == 0u);
+    CHECK(count_events(true, true, AP_DRW_ADDR2) == 1u);
+    CHECK((g_csw & 7u) == 2u);
+    return true;
+}
+
+static bool test_unaligned_read_never_widens_range(void)
+{
+    mock_reset();
+    CHECK(init_link());
+    g_event_count = 0u;
+    g_rdbuff_value = 0x44332211u;
+    uint8_t bytes[8];
+    const uint8_t expected[] = {0x22, 0x33, 0x44, 0x11, 0x22, 0x33, 0x44, 0x11};
+    const uint32_t addresses[] = {0x20000001u, 0x20000002u, 0x20000003u, 0x20000004u, 0x20000008u};
+    const uint32_t sizes[] = {0u, 0u, 0u, 2u, 0u};
+    CHECK(target_mem_read_bytes_impl(addresses[0], bytes, sizeof(bytes)));
+    CHECK(memcmp(bytes, expected, sizeof(bytes)) == 0);
+    size_t csw = 0, tar = 0;
+    for (size_t i = 0; i < g_event_count; i++) {
+        if (event_is(i, true, false, AP_CSW_ADDR2)) {
+            CHECK(csw < ARRAY_SIZE(sizes));
+            CHECK((g_events[i].value & 7u) == sizes[csw++]);
+        }
+        if (event_is(i, true, false, AP_TAR_ADDR2)) {
+            CHECK(tar < ARRAY_SIZE(addresses));
+            CHECK(g_events[i].value == addresses[tar++]);
+        }
+    }
+    CHECK(csw == ARRAY_SIZE(sizes) && tar == ARRAY_SIZE(addresses));
+    CHECK(count_events(true, true, AP_DRW_ADDR2) == ARRAY_SIZE(sizes));
+    return true;
+}
+
+static bool test_word_read_failure_is_not_retried_as_bytes(void)
+{
+    mock_reset();
+    CHECK(init_link());
+    g_event_count = 0u;
+    g_word_only_clear_on_read = true;
+    g_peripheral_value = 0x44332211u;
+    g_fail_read_completion = true;
+    uint8_t bytes[4] = {0};
+    const uint8_t unchanged[4] = {0};
+    CHECK(!target_mem_read_bytes_impl(0x40000000u, bytes, sizeof(bytes)));
+    CHECK(memcmp(bytes, unchanged, sizeof(bytes)) == 0);
+    CHECK(g_peripheral_value == 0u); // Read executed despite the failure.
+    CHECK(count_events(true, true, AP_DRW_ADDR2) == 1u);
+    CHECK((g_csw & 7u) == 2u);
+    return true;
+}
+
 static bool test_byte_ranges_reject_address_wrap_and_null_buffers(void)
 {
     mock_reset();
@@ -270,6 +353,9 @@ int main(void)
         {"AP write completion", test_ap_write_flushes_through_rdbuff},
         {"AP write completion error", test_ap_write_propagates_completion_fault},
         {"native byte read", test_byte_read_uses_native_size_and_lane},
+        {"word-only clear-on-read MMIO", test_word_only_clear_on_read_register},
+        {"unaligned exact read range", test_unaligned_read_never_widens_range},
+        {"word read completion failure", test_word_read_failure_is_not_retried_as_bytes},
         {"native byte write", test_byte_write_uses_lane_without_read_modify_write},
         {"byte range validation", test_byte_ranges_reject_address_wrap_and_null_buffers},
     };
