@@ -36,18 +36,15 @@
 #define PROBE_NRESET_IOMUX         (IOMUX_PINCM5)
 
 #if defined(PROBE_USE_HFXT) && (PROBE_USE_HFXT)
-// HFXT crystal pins: PA3/PINCM6 and PA4/PINCM7 (adjust when schematic is set)
-#define PROBE_HFXIN_IOMUX          (IOMUX_PINCM6)
-#define PROBE_HFXOUT_IOMUX         (IOMUX_PINCM7)
+// HFXT crystal pins: PA5/HFXIN (PINCM8), PA6/HFXOUT (PINCM9).
+#define PROBE_HFXIN_IOMUX          (IOMUX_PINCM8)
+#define PROBE_HFXOUT_IOMUX         (IOMUX_PINCM9)
 #endif
 
 #if defined(PROBE_ENABLE_JTAG) && (PROBE_ENABLE_JTAG)
 // JTAG data pins: TDI = PA3 (PINCM6), TDO = PA4 (PINCM7); see
-// IOMUX_PINCMn_PF_GPIOA_DIOxx in mspm0c1105_c1106.h. These PINCMs are also
-// the HFXT crystal pins, so JTAG and HFXT are mutually exclusive here.
-#if defined(PROBE_USE_HFXT) && (PROBE_USE_HFXT)
-#error "PROBE_ENABLE_JTAG conflicts with PROBE_USE_HFXT on C1105: PA3/PA4 (PINCM6/7) are the HFXT pins"
-#endif
+// IOMUX_PINCMn_PF_GPIOA_DIOxx in mspm0c1105_c1106.h. HFXT uses PA5/PA6,
+// so it can operate alongside JTAG on this mapping.
 #define PROBE_JTAG_TDI_PIN_DEF     DL_GPIO_PIN_3
 #define PROBE_JTAG_TDO_PIN_DEF     DL_GPIO_PIN_4
 #define PROBE_JTAG_TDI_IOMUX       (IOMUX_PINCM6)

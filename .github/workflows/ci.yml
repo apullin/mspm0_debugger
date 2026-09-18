@@ -86,6 +86,14 @@ jobs:
               -DPROBE_ENABLE_JTAG=ON
               -DPROBE_ENABLE_RISCV=ON
               -DPROBE_RISCV_JTAG_IR_LEN=32
+          - device: MSPM0C1105
+            arch: dual-hfxt-32mhz
+            arch_args: >-
+              -DPROBE_ENABLE_CORTEXM=ON
+              -DPROBE_ENABLE_JTAG=ON
+              -DPROBE_ENABLE_RISCV=ON
+              -DPROBE_USE_HFXT=ON
+              -DPROBE_HFXT_FREQ_HZ=32000000
     steps:
       - uses: actions/checkout@v4
 
