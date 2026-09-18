@@ -157,10 +157,10 @@ that deserve their own designs.
 
 ## Hardware notes discovered during the fix pass
 
-- **C1105: JTAG (TDI/TDO on PA3/PA4 = PINCM6/7) and HFXT share pins** —
-  now a compile error when both are enabled; the schematic needs to pick
-  one or move the JTAG pins.
-- **C110x has no PA3** — C1104 TDI/TDO are PA4 (PINCM5) / PA6 (PINCM7).
+- **C1105 HFXT and JTAG are independent** — corrected in the 2026-09 audit:
+  HFXIN/HFXOUT are PA5/PA6 (PINCM8/9), while JTAG TDI/TDO are PA3/PA4
+  (PINCM6/7). The erroneous conflict guard is removed and CI builds both together.
+- **C1104 has no PA3** — its TDI/TDO are PA4 (PINCM5) / PA6 (PINCM7).
 - **G5187 PA3/PA4 double as LFXT pins** (unused by this firmware, but a
   32 kHz crystal on the board would conflict with JTAG).
 - **SWDIO is now push-pull while driving** (Hi-Z + pull-up when

@@ -74,4 +74,34 @@ shared SWCLK/TCK and SWDIO/TMS. CMake rejects the mapping unless explicitly
 acknowledged; the schematic must move both signals to suitable push-pull pins
 before production.
 
-Last Updated: 2026-07-09
+## 2026-09-18 FIX Fresh audit: eight defects and regression gates
+
+**What**: Fixed C1104 dual stack exhaustion by sharing the RSP packet,
+register, and memory workspace (680 → 512 B statics). Hex byte/register
+serialization uses small named helpers; backward expansion preserves unread
+raw data, and asynchronous stops wait for the receive state to become idle.
+The linker now reserves 512 B and a linked-call-graph check enforces the
+compiler-derived stack bound plus 64 B of margin before image generation.
+
+**Protocol/driver fixes**: JTAG distinguishes request admission from NOP
+result polling, so clearing sticky BUSY cannot duplicate a side-effectful
+operation. Cortex continue recognizes fresh DFSR causes after a rapid re-halt;
+aligned four-byte memory reads use a single word transfer without widening
+partial reads. FPB/DWT ownership survives ambiguous enable/disable writes,
+and unconfirmed slots cannot falsely acknowledge duplicate insertion.
+RISC-V cleanup skips optional trigger CSRs when no triggers are owned.
+
+**Board correction**: The older notes above incorrectly identified C1105
+PA3/PA4 as HFXT pins. HFXT actually uses PA5/PA6 (PINCM8/9), independent of
+JTAG on PA3/PA4; the mapping and conflict guard are corrected.
+
+**Verification**: All 12 host suites pass (11 ASan/UBSan binaries and the
+stack-checker tests). All 15 firmware profiles build with warnings as errors,
+including the newly covered C1105 dual + HFXT configuration. GCC `-fanalyzer`
+passes on the G5187 dual/USB build. C1104 dual is 15,248 B flash and 512 B
+statics, with a 432 B conservative call-chain bound plus a 64 B required
+margin. The checker rejects the pre-fix image (424 B chain, only 344 B free).
+These are software/build checks; no board was flashed and physical SWD/JTAG,
+HFXT startup, and a hardware stack-watermark check remain bring-up gates.
+
+Last Updated: 2026-09-18

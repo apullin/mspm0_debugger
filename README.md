@@ -102,8 +102,8 @@ Configurable Cortex-M features:
 Measured with Arm GNU 12.2.1 and TI MSPM0 SDK 2.09.00.01 after the audit fix
 pass. Flash includes initialized data; SRAM is initialized data plus BSS.
 
-SRAM figures are statics only; the linker now ASSERTs that at least
-`_Min_Stack_Size` bytes remain for the stack above them (256 B on C1104,
+SRAM figures are statics only; the linker ASSERTs that at least
+`_Min_Stack_Size` bytes remain for the stack above them (512 B on C1104,
 1 KB on C1105/G5187). The link uses `-nostartfiles` (boot enters via the vector
 table's `Reset_Handler`), which keeps crt0/newlib-stdio out of RAM.
 
@@ -111,18 +111,26 @@ table's `Reset_Handler`), which keeps crt0/newlib-stdio out of RAM.
 
 Profile-sized buffers and no DWT watchpoints. The dual profile uses legacy ARM
 registers plus a minimal runtime RV32 descriptor. Retransmit-on-NACK remains
-enabled by reusing the receive packet buffer.
+enabled by reusing the receive packet buffer. Register/memory workspaces also
+share that buffer: decode forwards into consumed request bytes, encode replies
+backwards through small hex/little-endian serialization helpers, then frame
+and transmit. Asynchronous stop replies wait until reception is idle.
 
 | Configuration | Flash | SRAM |
 |---------------|-------|------|
-| Cortex-M only | 13,208 B (80.6%) | 512 B (50.0%) |
-| RISC-V only | 11,680 B (71.3%) | 496 B (48.4%) |
-| Dual (legacy ARM + minimal RV XML) | 15,136 B (92.4%) | 680 B (66.4%) |
+| Cortex-M only | 13,344 B (81.4%) | 384 B (37.5%) |
+| RISC-V only | 11,680 B (71.3%) | 368 B (35.9%) |
+| Dual (legacy ARM + minimal RV XML) | 15,248 B (93.1%) | 512 B (50.0%) |
 
-The GCC 12.2.1 dual image has 1,248 B of flash headroom. This remains the
-tightest and most compiler-sensitive profile, so the linker capacity check and
-CI matrix are release gates; re-check size whenever the toolchain or feature
-set changes.
+The GCC 12.2.1 dual image has 1,136 B of flash headroom and 512 B available
+for the stack. Its conservative linked call-chain bound is 432 B; the build
+requires another 64 B of margin before generating flashable images.
+`tools/check_stack.py` combines GCC stack-usage reports with the linked call
+graph and fixed stack allocations in prebuilt libraries. It rejects unmodeled
+indirect calls, recursion, unbounded/unrecognized stack use, and custom interrupt
+handlers. This gate is specific to the polling-only C1104 firmware, not a
+general interrupt/RTOS proof or a substitute for a hardware stack-watermark test.
+The linker, stack check, and CI matrix remain release gates as toolchains change.
 
 ### MSPM0C1105 (32 KB Flash / 8 KB SRAM) — `PROBE_TINY_RAM=OFF`
 
@@ -131,9 +139,12 @@ retransmit-on-NACK enabled.
 
 | Configuration | Flash | SRAM |
 |---------------|-------|------|
-| Cortex-M only | 16,040 B (49.0%) | 1,304 B (15.9%) |
-| RISC-V only | 11,224 B (34.3%) | 872 B (10.6%) |
-| Dual (CM + RV) | 21,832 B (66.6%) | 1,368 B (16.7%) |
+| Cortex-M only | 16,208 B (49.5%) | 1,056 B (12.9%) |
+| RISC-V only | 11,224 B (34.3%) | 616 B (7.5%) |
+| Dual (CM + RV) | 21,984 B (67.1%) | 1,120 B (13.7%) |
+
+Optional HFXT uses PA5/HFXIN (PINCM8) and PA6/HFXOUT (PINCM9); it does not
+conflict with the JTAG TDI/TDO mapping on PA3/PA4 (PINCM6/7).
 
 ### MSPM0G5187 (128 KB Flash / 32 KB SRAM) — USB-CDC
 
@@ -142,13 +153,13 @@ Disabling VCOM produces a single-port descriptor. TinyUSB stack included.
 
 | Configuration | Flash | SRAM |
 |---------------|-------|------|
-| Cortex-M only + USB | 25,520 B (19.5%) | 3,264 B (10.0%) |
-| RISC-V only + USB | 20,720 B (15.8%) | 2,832 B (8.6%) |
-| Dual (CM + RV) + USB | 31,328 B (23.9%) | 3,328 B (10.2%) |
+| Cortex-M only + USB | 25,696 B (19.6%) | 3,016 B (9.2%) |
+| RISC-V only + USB | 20,720 B (15.8%) | 2,576 B (7.9%) |
+| Dual (CM + RV) + USB | 31,480 B (24.0%) | 3,080 B (9.4%) |
 
 ## Host-Side Unit Tests
 
-The RSP layer has a desktop test suite (no hardware needed):
+The protocol and target drivers have desktop test suites (no hardware needed):
 
 ```
 cmake -S tests -B build_tests
@@ -156,22 +167,29 @@ cmake --build build_tests
 ctest --test-dir build_tests --output-on-failure
 ```
 
-Nine binaries run under ASan/UBSan: full, tiny Cortex, tiny RISC-V, and
+Eleven binaries run under ASan/UBSan: full, tiny Cortex, tiny RISC-V, and
 no-XML legacy RSP profiles; register-level suites that compile the production
 FLASHCTL, ADIv5/MEM-AP, Cortex, and RISC-V drivers rather than their RSP mocks;
-and boundary/randomized coverage for the compact 64-by-32 divider.
+boundary/randomized coverage for the compact 64-by-32 divider; and wire-level
+JTAG TAP/DTM models with 5- and 32-bit instruction registers. A twelfth suite
+tests the Python stack-budget checker, including rejection of the old budget.
+Regressions cover fragmented receive/stop interleaving, in-place serialization,
+word-only/clear-on-read MMIO, rapid Cortex re-halts, ambiguous comparator
+writes, absent RISC-V trigger CSRs, and exactly-once DMI BUSY recovery.
 
 GitHub Actions runs these host tests on Linux and macOS and builds all nine
 device/architecture combinations, plus C1104 legacy-no-XML and G5187
-single-CDC, C1105 32 MHz and fractional-MHz HFXT, and 32-bit JTAG-IR profiles,
+single-CDC, C1105 32 MHz and fractional-MHz HFXT, dual-architecture HFXT,
+and 32-bit JTAG-IR profiles (15 firmware configurations total),
 with warnings promoted to errors. Firmware CI checks out TI's tagged
 `mspm0_sdk_2_09_00_01` source repository.
 
 ## Requirements
 
 - CMake 3.20+
+- Python 3 (C1104 stack-budget gate and host-test checker)
 - Arm GNU Toolchain 9 or newer (`arm-none-eabi-gcc`, `arm-none-eabi-size`,
-  `arm-none-eabi-objcopy`)
+  `arm-none-eabi-objcopy`, `arm-none-eabi-objdump`, `arm-none-eabi-nm`)
 - TI MSPM0 SDK installed locally (default path):
   - `/Applications/ti/mspm0_sdk_2_09_00_01/`
 
