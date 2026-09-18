@@ -285,6 +285,72 @@ static void test_memory_rw(void)
     T_ASSERT(strcmp(r, "deadbeef") == 0);
 }
 
+static void test_partial_request_survives_async_stop(void)
+{
+    t_begin("asynchronous stop waits for every partial-packet boundary");
+    const char *commands[] = {"m20000000,4", "qSupported:multiprocess+"};
+    for (unsigned noack = 0; noack < 2u; noack++) {
+        for (size_t cmd = 0; cmd < sizeof(commands) / sizeof(commands[0]); cmd++) {
+            char frame[80];
+            size_t len = (size_t) snprintf(frame, sizeof(frame), "$%s#%02x", commands[cmd],
+                                          csum(commands[cmd], strlen(commands[cmd])));
+            for (size_t split = 1; split < len; split++) {
+                mock_reset();
+                rsp_init();
+                if (noack) xact("QStartNoAckMode");
+                send_str("c");
+                tx_clear();
+                feed(frame, split);
+                mock_halted = true;
+                mock_watch_hit = true;
+                mock_watch_addr = 0x20000042u;
+                rsp_poll();
+                T_ASSERT(mock_tx_len == 0u);
+                T_ASSERT(mock_watch_hit); // Do not consume the pending reason.
+                feed(frame + split, len - split);
+                get_reply(reply_buf, sizeof(reply_buf), NULL);
+                if (cmd == 0u) T_ASSERT(strlen(reply_buf) == 8u);
+                else {
+                    T_ASSERT(strstr(reply_buf, "PacketSize=") == reply_buf);
+                    T_ASSERT(mock_attach_calls == 1);
+                }
+                tx_clear();
+                rsp_poll();
+                if (cmd == 0u) {
+                    get_reply(reply_buf, sizeof(reply_buf), NULL);
+                    T_ASSERT(strcmp(reply_buf, "T05watch:20000042;") == 0);
+                } else T_ASSERT(mock_tx_len == 0u); // New session consumed old run state.
+                tx_clear();
+                rsp_poll();
+                T_ASSERT(mock_tx_len == 0u);
+            }
+        }
+    }
+    // A bad or oversized request must also leave the deferred stop reportable.
+    for (unsigned oversize = 0; oversize < 2u; oversize++) {
+        mock_reset();
+        rsp_init();
+        send_str("c");
+        tx_clear();
+        feed("$", 1u);
+        for (size_t i = 0; i < (oversize ? RSP_MAX_PAYLOAD + 1u : 1u); i++) feed("a", 1u);
+        mock_halted = true;
+        rsp_poll();
+        T_ASSERT(mock_tx_len == 0u);
+        feed("#", 1u);
+        rsp_poll();
+        feed("0", 1u);
+        rsp_poll();
+        T_ASSERT(mock_tx_len == 0u);
+        feed("0", 1u);
+        T_ASSERT(mock_tx_len == 1u && mock_tx[0] == '-');
+        tx_clear();
+        rsp_poll();
+        get_reply(reply_buf, sizeof(reply_buf), NULL);
+        T_ASSERT(strcmp(reply_buf, "S05") == 0);
+    }
+}
+
 static void test_parse_strictness(void)
 {
     t_begin("malformed hex is rejected instead of read as address 0");
@@ -713,6 +779,7 @@ int main(void)
     test_G_write_registers_rv();
 #endif
     test_memory_rw();
+    test_partial_request_survives_async_stop();
     test_parse_strictness();
     test_truncated_M_oob();
     test_X_binary_write();

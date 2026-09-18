@@ -1181,7 +1181,7 @@ void rsp_process_byte(uint8_t c)
 
 void rsp_poll(void)
 {
-    if (!rsp_running) {
+    if (!rsp_running || rsp_state != RSP_IDLE) {
         return;
     }
     bool halted = false;
