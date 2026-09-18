@@ -285,6 +285,77 @@ static void test_memory_rw(void)
     T_ASSERT(strcmp(r, "deadbeef") == 0);
 }
 
+static void test_shared_memory_workspace(void)
+{
+    t_begin("in-place memory serialization at every supported length");
+    char expected[2u * RSP_IOBUF_SIZE + 1u];
+    char cmd[RSP_MAX_PAYLOAD + 1u];
+    for (size_t i = 0; i < RSP_IOBUF_SIZE; i++) {
+        mock_mem[i] = (uint8_t) (73u * i + 19u);
+        expected[2u * i] = hexc(mock_mem[i] >> 4);
+        expected[2u * i + 1u] = hexc(mock_mem[i]);
+    }
+    for (size_t len = 0; len <= RSP_IOBUF_SIZE; len++) {
+        snprintf(cmd, sizeof(cmd), "m20000000,%zx", len);
+        const char *r = xact(cmd);
+        T_ASSERT(strlen(r) == 2u * len);
+        T_ASSERT(strncmp(r, expected, 2u * len) == 0);
+    }
+    // Largest encoded reply remains intact for exact checksum/retransmission.
+    char frame[RSP_MAX_PAYLOAD + 4u];
+    size_t frame_len = mock_tx_len - 1u; // Skip request ACK.
+    T_ASSERT(frame_len <= sizeof(frame));
+    memcpy(frame, mock_tx + 1u, frame_len);
+    tx_clear();
+    feed("-", 1u);
+    T_ASSERT(mock_tx_len == frame_len);
+    T_ASSERT(memcmp(mock_tx, frame, frame_len) == 0);
+
+    for (size_t len = 0; len <= RSP_IOBUF_SIZE; len++) {
+        size_t header = (size_t) snprintf(cmd, sizeof(cmd), "M20000000,%zx:", len);
+        if (header + 2u * len > RSP_MAX_PAYLOAD) break;
+        memcpy(cmd + header, expected, 2u * len);
+        cmd[header + 2u * len] = '\0';
+        memset(mock_mem, 0, sizeof(mock_mem));
+        T_ASSERT(strcmp(xact(cmd), "OK") == 0);
+        for (size_t i = 0; i < len; i++) {
+            T_ASSERT(mock_mem[i] == (uint8_t) (73u * i + 19u));
+        }
+        T_ASSERT(mock_mem[len] == 0u);
+    }
+}
+
+static void test_shared_register_workspace(void)
+{
+    t_begin("register serialization preserves byte order and overlapping storage");
+    for (unsigned arch = MOCK_ARCH_CM; arch <= MOCK_ARCH_RV; arch++) {
+#if !defined(PROBE_ENABLE_RISCV) || !PROBE_ENABLE_RISCV
+        if (arch == MOCK_ARCH_RV) continue;
+#endif
+        mock_arch = (mock_arch_t) arch;
+        uint32_t count = arch == MOCK_ARCH_RV ? 33u : TEST_CM_REMOTE_REGS;
+        char cmd[1u + 42u * 8u + 1u] = "G";
+        for (uint32_t i = 0; i < count; i++) {
+            for (uint32_t byte = 0; byte < 4u; byte++) {
+                uint8_t value = (uint8_t) (i * 37u + byte * 73u + 19u);
+#if TEST_LEGACY
+                if (arch == MOCK_ARCH_CM && i >= 16u && i < 41u) value = 0;
+#endif
+                size_t pos = 1u + 8u * i + 2u * byte;
+                cmd[pos] = hexc(value >> 4);
+                cmd[pos + 1u] = hexc(value);
+            }
+        }
+        cmd[1u + 8u * count] = '\0';
+        T_ASSERT(strcmp(xact(cmd), "OK") == 0);
+        T_ASSERT(strcmp(xact("g"), cmd + 1u) == 0);
+        tx_clear();
+        feed("-", 1u);
+        get_reply(reply_buf, sizeof(reply_buf), NULL);
+        T_ASSERT(strcmp(reply_buf, cmd + 1u) == 0);
+    }
+}
+
 static void test_partial_request_survives_async_stop(void)
 {
     t_begin("asynchronous stop waits for every partial-packet boundary");
@@ -779,6 +850,8 @@ int main(void)
     test_G_write_registers_rv();
 #endif
     test_memory_rw();
+    test_shared_memory_workspace();
+    test_shared_register_workspace();
     test_partial_request_survives_async_stop();
     test_parse_strictness();
     test_truncated_M_oob();

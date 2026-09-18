@@ -51,9 +51,9 @@
 #endif
 #endif
 
-// Memory payloads and register blocks are handled by disjoint commands, so
-// overlay them. This is material on the 1 KB C1104 and keeps the correct
-// 168-byte legacy ARM layout compatible with the enforced stack reserve.
+// Register and memory commands decode into the already-consumed prefix of
+// their request. Replies expand backwards in the same buffer before framing.
+// Sharing all three lifetimes leaves room for the stack on the 1 KB C1104.
 #if (!defined(PROBE_ENABLE_QXFER_TARGET_XML) || !(PROBE_ENABLE_QXFER_TARGET_XML)) && \
     defined(PROBE_ENABLE_CORTEXM) && (PROBE_ENABLE_CORTEXM)
 #define RSP_MAX_REGS 42u // Legacy ARM: 168-byte r/FPA/FPS/CPSR layout
@@ -63,12 +63,16 @@
 #define RSP_MAX_REGS 17u // Cortex-M: r0-r15 + xPSR
 #endif
 typedef union {
+    char     packet[RSP_MAX_PAYLOAD + 5u];
     uint32_t regs[RSP_MAX_REGS];
     uint8_t  iobuf[RSP_IOBUF_SIZE];
-} rsp_work_t;
-static rsp_work_t rsp_work;
-#define rsp_regs  (rsp_work.regs)
-#define rsp_iobuf (rsp_work.iobuf)
+} rsp_storage_t;
+static rsp_storage_t rsp_storage;
+#define rsp_buf   (rsp_storage.packet)
+#define rsp_regs  (rsp_storage.regs)
+#define rsp_iobuf (rsp_storage.iobuf)
+_Static_assert(RSP_MAX_PAYLOAD >= 8u * RSP_MAX_REGS + 1u, "G packet must fit");
+_Static_assert(RSP_MAX_PAYLOAD >= 2u * RSP_IOBUF_SIZE, "memory reply must fit");
 
 typedef enum {
     RSP_IDLE = 0,
@@ -81,10 +85,8 @@ typedef enum {
 } rsp_state_t;
 
 static rsp_state_t rsp_state = RSP_IDLE;
-// Shared receive/retransmit storage. A reply is generated only after its
-// request has been parsed, so reusing the packet buffer gives tiny builds
-// standards-compliant NACK retransmission without a second 256-byte buffer.
-static char        rsp_buf[RSP_MAX_PAYLOAD + 5u];
+// rsp_poll defers asynchronous replies until the receiver is idle, so it
+// cannot overwrite a partial request in the shared receive/retransmit buffer.
 static uint32_t    rsp_len     = 0;
 static uint8_t     rsp_sum     = 0;
 static uint8_t     rsp_rx_csum = 0;
@@ -138,6 +140,28 @@ static char nibble_hex(uint8_t n)
 {
     n &= 0xF;
     return (n < 10) ? (char) ('0' + n) : (char) ('a' + (n - 10));
+}
+
+// Buffered hex serialization: byte offsets refer to the unencoded data.
+// Reserve the frame's leading '$', then allocate two characters per byte.
+static char *rsp_hex_slot(uint32_t byte_offset)
+{
+    return rsp_buf + 1u + 2u * byte_offset;
+}
+
+static char *rsp_encode_hex_byte(char *out, uint8_t value)
+{
+    *out++ = nibble_hex(value >> 4);
+    *out++ = nibble_hex(value);
+    return out;
+}
+
+static void rsp_encode_hex_u32_le(char *out, uint32_t value)
+{
+    for (uint32_t byte = 0; byte < sizeof(value); byte++) {
+        out = rsp_encode_hex_byte(out, (uint8_t) value);
+        value >>= 8;
+    }
 }
 
 static void rsp_put_hex_u8(uint8_t v)
@@ -213,6 +237,20 @@ static void rsp_send_packet_end(uint8_t sum)
 {
     rsp_tx_byte('#');
     rsp_put_hex_u8(sum);
+}
+
+// Payload is already in rsp_buf[1..len], leaving room for '$'. Recording
+// each transmitted byte overwrites only that same byte, preserving replay.
+static void rsp_send_buffer(uint32_t len)
+{
+    uint8_t sum;
+    rsp_send_packet_begin(&sum);
+    for (uint32_t i = 1; i <= len; i++) {
+        uint8_t c = (uint8_t) rsp_buf[i];
+        sum = (uint8_t) (sum + c);
+        rsp_tx_byte(c);
+    }
+    rsp_send_packet_end(sum);
 }
 
 static void rsp_send_packet_str(const char *payload)
@@ -347,38 +385,22 @@ static bool rsp_hex_to_bytes(const char *hex, uint8_t *out, uint32_t outlen)
 
 static void rsp_send_bytes_as_hex(const uint8_t *data, uint32_t len)
 {
-    uint8_t sum;
-    rsp_send_packet_begin(&sum);
-    for (uint32_t i = 0; i < len; i++) {
-        uint8_t b  = data[i];
-        char    h1 = nibble_hex(b >> 4);
-        char    h2 = nibble_hex(b);
-        sum        = (uint8_t) (sum + (uint8_t) h1);
-        rsp_tx_byte((uint8_t) h1);
-        sum = (uint8_t) (sum + (uint8_t) h2);
-        rsp_tx_byte((uint8_t) h2);
+    // data aliases rsp_buf. Expand backwards before writing the '$' header.
+    for (uint32_t i = len; i != 0u;) {
+        uint8_t b = data[--i];
+        rsp_encode_hex_byte(rsp_hex_slot(i), b);
     }
-    rsp_send_packet_end(sum);
+    rsp_send_buffer(2u * len);
 }
 
 static void rsp_send_regs_hex(const uint32_t *regs, uint32_t count)
 {
-    uint8_t sum;
-    rsp_send_packet_begin(&sum);
-    for (uint32_t i = 0; i < count; i++) {
-        uint32_t v = regs[i];
-        for (int j = 0; j < 4; j++) {
-            uint8_t b  = (uint8_t) (v & 0xFF);
-            char    h1 = nibble_hex(b >> 4);
-            char    h2 = nibble_hex(b);
-            sum        = (uint8_t) (sum + (uint8_t) h1);
-            rsp_tx_byte((uint8_t) h1);
-            sum = (uint8_t) (sum + (uint8_t) h2);
-            rsp_tx_byte((uint8_t) h2);
-            v >>= 8;
-        }
+    // Read each whole register before overwriting its shared raw storage.
+    for (uint32_t i = count; i != 0u;) {
+        uint32_t v = regs[--i];
+        rsp_encode_hex_u32_le(rsp_hex_slot(i * sizeof(v)), v);
     }
-    rsp_send_packet_end(sum);
+    rsp_send_buffer(8u * count);
 }
 
 static bool rsp_parse_regs_hex(const char *hex, uint32_t *regs, uint32_t count)

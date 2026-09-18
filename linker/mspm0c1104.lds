@@ -33,7 +33,7 @@
 *****************************************************************************/
 /* Generate a link error if heap and stack don't fit into RAM */
 _Min_Heap_Size  = 0;      /* required amount of heap  */
-_Min_Stack_Size = 0x100; /* required amount of stack (enforced by ASSERT below) */
+_Min_Stack_Size = 0x200; /* 512 B; linked call graph + margin checked after link */
 
 /* Specify the memory areas */
 MEMORY

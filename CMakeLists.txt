@@ -430,6 +430,7 @@ target_compile_options(mspm0_debugger.elf PRIVATE
     -ffunction-sections
     -fdata-sections
     -fno-common
+    -fstack-usage
     -Os
     -g3
     -Wall
@@ -467,6 +468,23 @@ endif()
 set(PROBE_MAP_FILE "${CMAKE_CURRENT_BINARY_DIR}/mspm0_debugger.map")
 set(PROBE_HEX_FILE "${CMAKE_CURRENT_BINARY_DIR}/mspm0_debugger.hex")
 set(PROBE_BIN_FILE "${CMAKE_CURRENT_BINARY_DIR}/mspm0_debugger.bin")
+set_property(TARGET mspm0_debugger.elf APPEND PROPERTY LINK_DEPENDS "${PROBE_LINKER_SCRIPT}")
+
+if(PROBE_DEVICE STREQUAL "MSPM0C1104")
+    if(NOT CMAKE_OBJDUMP OR NOT CMAKE_NM)
+        message(FATAL_ERROR "The C1104 stack check requires CMAKE_OBJDUMP and CMAKE_NM from the ARM toolchain")
+    endif()
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    set(PROBE_STACK_CHECK "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_stack.py")
+    set_property(TARGET mspm0_debugger.elf APPEND PROPERTY LINK_DEPENDS "${PROBE_STACK_CHECK}")
+    # Run before image generation: a failed budget check must not produce a
+    # flashable artifact. The linker separately reserves at least 512 bytes.
+    set(PROBE_STACK_CHECK_COMMAND
+        COMMAND "${Python3_EXECUTABLE}" "${PROBE_STACK_CHECK}"
+            --elf $<TARGET_FILE:mspm0_debugger.elf>
+            --su-dir "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/mspm0_debugger.elf.dir"
+            --objdump "${CMAKE_OBJDUMP}" --nm "${CMAKE_NM}" --margin 64)
+endif()
 
 # Remove flashable artifacts before linking so a failed relink cannot leave an
 # apparently current .hex/.bin behind. BYPRODUCTS and ADDITIONAL_CLEAN_FILES
@@ -480,6 +498,7 @@ add_custom_command(TARGET mspm0_debugger.elf PRE_LINK
 add_custom_command(TARGET mspm0_debugger.elf POST_BUILD
     BYPRODUCTS "${PROBE_HEX_FILE}" "${PROBE_BIN_FILE}"
     COMMAND "${CMAKE_SIZE}" $<TARGET_FILE:mspm0_debugger.elf>
+    ${PROBE_STACK_CHECK_COMMAND}
     COMMAND "${CMAKE_OBJCOPY}" -O ihex $<TARGET_FILE:mspm0_debugger.elf> "${PROBE_HEX_FILE}"
     COMMAND "${CMAKE_OBJCOPY}" -O binary $<TARGET_FILE:mspm0_debugger.elf> "${PROBE_BIN_FILE}"
     VERBATIM

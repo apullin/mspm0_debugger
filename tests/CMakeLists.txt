@@ -150,3 +150,6 @@ add_test(NAME riscv COMMAND riscv_tests)
 add_test(NAME intmath COMMAND intmath_tests)
 add_test(NAME jtag_ir5 COMMAND jtag_tests_ir5)
 add_test(NAME jtag_ir32 COMMAND jtag_tests_ir32)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME stack_budget_checker
+    COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/test_stack_check.py")
