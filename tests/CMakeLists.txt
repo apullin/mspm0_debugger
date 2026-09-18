@@ -127,6 +127,17 @@ add_executable(intmath_tests
 )
 target_include_directories(intmath_tests PRIVATE ${INCS})
 
+# Drive the production bit-banger against a TAP/DTM pin model, including
+# wider instruction registers and exactly-once recovery from sticky BUSY.
+foreach(ir_len IN ITEMS 5 32)
+    add_executable(jtag_tests_ir${ir_len}
+        ${CMAKE_CURRENT_SOURCE_DIR}/../src/jtag_bitbang.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_jtag.c)
+    target_include_directories(jtag_tests_ir${ir_len} PRIVATE ${INCS})
+    target_compile_definitions(jtag_tests_ir${ir_len} PRIVATE
+        PROBE_ENABLE_JTAG=1 PROBE_RISCV_JTAG_IR_LEN=${ir_len})
+endforeach()
+
 enable_testing()
 add_test(NAME rsp_full COMMAND rsp_tests_full)
 add_test(NAME rsp_tiny COMMAND rsp_tests_tiny)
@@ -137,3 +148,5 @@ add_test(NAME adiv5_target_mem COMMAND adiv5_target_mem_tests)
 add_test(NAME cortex COMMAND cortex_tests)
 add_test(NAME riscv COMMAND riscv_tests)
 add_test(NAME intmath COMMAND intmath_tests)
+add_test(NAME jtag_ir5 COMMAND jtag_tests_ir5)
+add_test(NAME jtag_ir32 COMMAND jtag_tests_ir32)

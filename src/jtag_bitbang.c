@@ -299,12 +299,10 @@ static void jtag_dmi_idle_cycles(void)
     }
 }
 
-// One request scan followed by one NOP scan. The value captured during a
-// scan is the result of the PREVIOUS operation, so the NOP scan is what
-// retrieves this operation's status (and read data). Returns the op status
-// field: 0=success, 2=failed, 3=busy.
-static uint8_t jtag_dmi_scan_pair(uint32_t addr, uint32_t data_in, uint8_t op,
-                                  uint32_t *data_out)
+// Capture the PREVIOUS operation's result, then submit op at Update-DR.
+// If the captured status is busy/failed, this scan's new op is discarded.
+static uint8_t jtag_dmi_scan(uint32_t addr, uint32_t data_in, uint8_t op,
+                             uint32_t *data_out)
 {
     // Select DMI
     jtag_select_dtm_ir(JTAG_IR_DMI);
@@ -327,15 +325,6 @@ static uint8_t jtag_dmi_scan_pair(uint32_t addr, uint32_t data_in, uint8_t op,
     jtag_tms(0);  // Update-DR -> Idle
     jtag_dmi_idle_cycles();
 
-    // NOP scan to collect the result of the request above
-    for (int i = 0; i < 8; i++) {
-        tdi[i] = 0;  // DMI_OP_NOP
-    }
-    jtag_shift_dr(tdi, tdo, total_bits);
-    jtag_tms(1);
-    jtag_tms(0);
-    jtag_dmi_idle_cycles();
-
     // Parse response
     uint64_t response = 0;
     for (int i = 0; i < 8; i++) {
@@ -353,10 +342,18 @@ static bool jtag_dmi_op(uint32_t addr, uint32_t data_in, uint8_t op, uint32_t *d
     if (!g_dmi_transport_valid) return false;
     if (g_dmi_abits < 32u && addr >= (1u << g_dmi_abits)) return false;
 
+    bool submitted = false;
     for (uint32_t attempt = 0; attempt < DMI_OP_RETRIES; attempt++) {
-        uint8_t resp = jtag_dmi_scan_pair(addr, data_in, op, data_out);
+        uint32_t result;
+        uint8_t resp = jtag_dmi_scan(addr, data_in,
+                                    submitted ? DMI_OP_NOP : op, &result);
         if (resp == 0u) {
-            return true;
+            if (submitted) {
+                if (data_out) *data_out = result;
+                return true;
+            }
+            submitted = true;
+            continue;
         }
 
         // Busy (3) and failed (2) are sticky; recover the DTM either way.
@@ -366,8 +363,10 @@ static bool jtag_dmi_op(uint32_t addr, uint32_t data_in, uint8_t op, uint32_t *d
             return false;  // real error, don't retry
         }
 
-        // Busy: the scanned operation was discarded, so retrying is safe.
-        // Give the DM more breathing room from now on.
+        // dmireset clears sticky status but DOES NOT cancel an outstanding
+        // operation. Once submitted, poll with NOPs only: resending a write
+        // or a side-effectful read could execute it twice. Only a request
+        // discarded during its own admission scan may be resubmitted.
         if (g_dmi_idle < 16u) {
             g_dmi_idle++;
         }
